@@ -152,6 +152,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--warmup", type=int, default=1, help="warm-up passes per side")
     parser.add_argument("--strict", action="store_true",
                         help="exit 1 when engine is slower than sqlite3")
+    parser.add_argument("--threshold", type=float, default=1.0,
+                        help="max allowed engine/sqlite3 median ratio (a2 "
+                             "gate; the requester-confirmed 'comparable' "
+                             "threshold, default 1.0 = engine <= sqlite3)")
     args = parser.parse_args(argv)
 
     # a4 failure path: sqlite3 baseline unavailable -> non-zero + diagnostic.
@@ -220,9 +224,10 @@ def main(argv: Optional[List[str]] = None) -> int:
           f"runs={[f'{t * 1000:.1f}' for t in sqlite_times]}")
     print(f"ratio engine/sqlite3 = {ratio:.3f}")
 
-    ok = engine_med <= sqlite_med
+    ok = engine_med <= sqlite_med * args.threshold
     print(f"RESULT: {'PASS' if ok else 'FAIL'} "
-          f"(engine {'<=' if ok else '>'} sqlite3 median)")
+          f"(engine {'<=' if ok else '>'} sqlite3 median"
+          f"{f' * {args.threshold}' if args.threshold != 1.0 else ''})")
     if not ok and args.strict:
         return 1
     return 0

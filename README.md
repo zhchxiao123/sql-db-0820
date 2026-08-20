@@ -187,3 +187,22 @@ python benchmark.py --runs 7 --warmup 1
 The official sqlite3 CLI is not installed in this sandbox (and the tool
 boundary forbids fetching it), so the baseline is the Python `sqlite3` module
 — the same SQLite library the parity harness uses as ground truth.
+
+### Overall acceptance (consolidation)
+
+`acceptance.py` chains the parent requirement's acceptance criteria into one
+long-term regression asset:
+
+* **a1 correctness** — the bundled success corpus runs green (0 failed) via
+  the engine, exit non-zero otherwise;
+* **a4 failure path** — the failure-path corpus still fails (the seam is
+  preserved), missing corpus / engine crash / baseline failure exit non-zero
+  with diagnostics;
+* **a2 performance** — reuses `benchmark.py`; exit 0 only when the engine
+  median ≤ sqlite3 baseline median × `--threshold` (default 1.0; pass the
+  requester-confirmed "comparable" threshold when one is issued).
+
+```
+python acceptance.py --runs 7 --warmup 2            # strict (engine <= sqlite3)
+python acceptance.py --threshold 1.0 --runs 7       # same, explicit
+```

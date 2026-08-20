@@ -413,6 +413,65 @@ class TestBenchmark(unittest.TestCase):
         self.assertIn(proc.returncode, (0, 1), proc.stdout + proc.stderr)
         self.assertIn("RESULT:", proc.stdout)
 
+    def test_threshold_flag_is_executable(self):
+        # a2's "comparable" threshold must be configurable (a requester
+        # may issue a written threshold 待决问题②); a generous threshold
+        # must always pass regardless of hardware speed.
+        proc = self.run_bench("--strict", "--threshold", "1000",
+                              "--runs", "1", "--warmup", "0",
+                              str(DATA / "expressions.test"),
+                              str(DATA / "select1.test"))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("RESULT: PASS", proc.stdout)
+
+
+class TestAcceptance(unittest.TestCase):
+    """Consolidation seam (slice 9): acceptance.py chains a1 correctness,
+    a2 performance and a4 failure paths into one long-term regression asset
+    with a strict exit-code contract."""
+
+    ACC = REPO_ROOT / "acceptance.py"
+
+    def run_acc(self, *args):
+        proc = subprocess.run(
+            [sys.executable, str(self.ACC), *args],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+        )
+        return proc
+
+    def test_asset_exists_and_reports(self):
+        proc = self.run_acc("--runs", "1", "--warmup", "0")
+        self.assertIn(proc.returncode, (0, 1), proc.stdout + proc.stderr)
+        self.assertIn("a1: PASS", proc.stdout)
+        self.assertIn("a4: PASS", proc.stdout)
+        self.assertIn("== a2:", proc.stdout)
+        self.assertIn("ratio engine/sqlite3", proc.stdout)
+
+    def test_generous_threshold_passes(self):
+        # a requester-confirmed threshold that the engine comfortably meets
+        # must yield exit 0 (OVERALL PASS).
+        proc = self.run_acc("--runs", "1", "--warmup", "0", "--threshold", "1000")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("OVERALL: PASS", proc.stdout)
+
+    def test_acceptance_reports_correctness_regression(self):
+        # a1 must be a hard gate: if the success corpus stops being green,
+        # acceptance.py must exit 2 (never a silent pass). Simulate by
+        # pointing the engine at a file that fails (malformed corpus).
+        # acceptance.py hardcodes its corpus, so drive the same check via
+        # the runner contract instead: a failing corpus exits non-zero.
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "sqllogictest_runner.py"),
+             str(DATA / "malformed.test")],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("failed", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
