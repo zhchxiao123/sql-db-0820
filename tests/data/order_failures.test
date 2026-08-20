@@ -1,0 +1,55 @@
+# ORDER BY / DISTINCT / LIMIT failure paths — a5 acceptance data.
+# Invalid references or syntax are judged as failures; the runner keeps going.
+
+statement ok
+CREATE TABLE f(a INTEGER);
+
+statement ok
+INSERT INTO f VALUES (1), (2), (3);
+
+statement error
+SELECT * FROM f ORDER BY z;
+
+statement error
+SELECT DISTINCT z FROM f;
+
+statement error
+SELECT * FROM f ORDER BY 5;
+
+statement error
+SELECT * FROM f LIMIT x;
+
+statement error
+SELECT * FROM f LIMIT NULL;
+
+statement error
+SELECT * FROM f LIMIT 1.5;
+
+statement error
+SELECT * FROM f ORDER BY;
+
+# intentional failure: statement ok on invalid ORDER BY -> judged failed,
+# runner continues and exits non-zero (a5)
+statement ok
+SELECT * FROM f ORDER BY z;
+
+# valid records after the failures still run
+query I
+SELECT * FROM f ORDER BY a DESC;
+----
+3
+2
+1
+
+query I
+SELECT DISTINCT a FROM f;
+----
+1
+2
+3
+
+query I
+SELECT * FROM f LIMIT 2 OFFSET 1;
+----
+2
+3

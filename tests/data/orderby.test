@@ -1,0 +1,141 @@
+# ORDER BY — a1 acceptance data (select3.test style).
+# NULL sorts smallest (ASC first, DESC last); multi-column lexicographic
+# with per-column ASC/DESC; expressions and ordinals supported.
+
+statement ok
+CREATE TABLE t(a INTEGER, b TEXT);
+
+statement ok
+INSERT INTO t VALUES (3, 'c'), (1, 'a'), (NULL, 'n'), (2, 'b'), (3, 'C'), (1, 'A');
+
+query I
+SELECT a FROM t ORDER BY a;
+----
+NULL
+1
+1
+2
+3
+3
+
+query I
+SELECT a FROM t ORDER BY a DESC;
+----
+3
+3
+2
+1
+1
+NULL
+
+query IT
+SELECT a, b FROM t ORDER BY a, b;
+----
+NULL
+n
+1
+A
+1
+a
+2
+b
+3
+C
+3
+c
+
+query IT
+SELECT a, b FROM t ORDER BY a DESC, b ASC;
+----
+3
+C
+3
+c
+2
+b
+1
+A
+1
+a
+NULL
+n
+
+query T
+SELECT b FROM t ORDER BY b;
+----
+A
+C
+a
+b
+c
+n
+
+query T
+SELECT b FROM t ORDER BY b DESC;
+----
+n
+c
+b
+a
+C
+A
+
+# ORDER BY expression
+query IT
+SELECT a, b FROM t ORDER BY a+1;
+----
+NULL
+n
+1
+a
+1
+A
+2
+b
+3
+c
+3
+C
+
+# ORDER BY ordinal (1-based output column)
+query IT
+SELECT a, b FROM t ORDER BY 1;
+----
+NULL
+n
+1
+a
+1
+A
+2
+b
+3
+c
+3
+C
+
+query IT
+SELECT a, b FROM t ORDER BY 2 DESC;
+----
+NULL
+n
+3
+c
+2
+b
+1
+a
+3
+C
+1
+A
+
+# ORDER BY with WHERE
+query I
+SELECT a FROM t WHERE a IS NOT NULL ORDER BY a DESC;
+----
+3
+3
+2
+1
+1
