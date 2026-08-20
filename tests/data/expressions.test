@@ -1,0 +1,337 @@
+# Expression SELECT corpus (no FROM clause) — a2 acceptance data.
+# Plaintext expectations, one value per line, NULL rendered as NULL.
+
+# --- literals ---
+query I
+SELECT 1;
+----
+1
+
+query I
+SELECT -42;
+----
+-42
+
+query R
+SELECT 3.5;
+----
+3.5
+
+query R
+SELECT 3.0;
+----
+3.0
+
+query T
+SELECT 'hello';
+----
+hello
+
+query T
+SELECT 'it''s';
+----
+it's
+
+query I
+SELECT NULL;
+----
+NULL
+
+query I
+SELECT TRUE;
+----
+1
+
+query I
+SELECT FALSE;
+----
+0
+
+# --- arithmetic and parentheses ---
+query I
+SELECT 1+2*3;
+----
+7
+
+query I
+SELECT (1+2)*3;
+----
+9
+
+query I
+SELECT 2*3+1;
+----
+7
+
+query I
+SELECT 10-4-3;
+----
+3
+
+query I
+SELECT 7/2;
+----
+3
+
+query I
+SELECT -7/2;
+----
+-3
+
+query R
+SELECT 7.0/2;
+----
+3.5
+
+query I
+SELECT 7%3;
+----
+1
+
+query I
+SELECT -7%3;
+----
+-1
+
+query I
+SELECT 1/0;
+----
+NULL
+
+query I
+SELECT -5+3;
+----
+-2
+
+query R
+SELECT 0.1+0.2;
+----
+0.3
+
+query I
+SELECT 2*3;
+----
+6
+
+# --- comparison ---
+query I
+SELECT 1<2;
+----
+1
+
+query I
+SELECT 2<=2;
+----
+1
+
+query I
+SELECT 3>4;
+----
+0
+
+query I
+SELECT 1=1;
+----
+1
+
+query I
+SELECT 1==1;
+----
+1
+
+query I
+SELECT 1!=2;
+----
+1
+
+query I
+SELECT 1<>1;
+----
+0
+
+query I
+SELECT 'a'<'b';
+----
+1
+
+query I
+SELECT 2+3=5;
+----
+1
+
+# --- NULL semantics ---
+query I
+SELECT NULL=1;
+----
+NULL
+
+query I
+SELECT 1=NULL;
+----
+NULL
+
+query I
+SELECT NULL<2;
+----
+NULL
+
+query I
+SELECT NULL IS NULL;
+----
+1
+
+query I
+SELECT 1 IS NULL;
+----
+0
+
+query I
+SELECT NULL IS NOT NULL;
+----
+0
+
+query I
+SELECT 1 IS NOT NULL;
+----
+1
+
+query I
+SELECT NULL IS 1;
+----
+0
+
+query I
+SELECT 2 IS 2;
+----
+1
+
+# --- logical operators ---
+query I
+SELECT 1 AND 1;
+----
+1
+
+query I
+SELECT 1 AND 0;
+----
+0
+
+query I
+SELECT NULL AND 0;
+----
+0
+
+query I
+SELECT NULL AND 1;
+----
+NULL
+
+query I
+SELECT NULL AND NULL;
+----
+NULL
+
+query I
+SELECT 1 OR 0;
+----
+1
+
+query I
+SELECT NULL OR 1;
+----
+1
+
+query I
+SELECT NULL OR 0;
+----
+NULL
+
+query I
+SELECT NOT 1;
+----
+0
+
+query I
+SELECT NOT 0;
+----
+1
+
+query I
+SELECT NOT NULL;
+----
+NULL
+
+query I
+SELECT 1 AND (2 OR 0);
+----
+1
+
+# --- CASE WHEN ---
+query I
+SELECT CASE WHEN 1 THEN 2 ELSE 3 END;
+----
+2
+
+query I
+SELECT CASE WHEN 0 THEN 1 ELSE 2 END;
+----
+2
+
+query I
+SELECT CASE WHEN NULL THEN 1 ELSE 2 END;
+----
+2
+
+query I
+SELECT CASE WHEN 0 THEN 1 END;
+----
+NULL
+
+query I
+SELECT CASE WHEN 1 THEN 2 WHEN 1 THEN 3 END;
+----
+2
+
+query T
+SELECT CASE 2 WHEN 1 THEN 'a' WHEN 2 THEN 'b' END;
+----
+b
+
+query I
+SELECT CASE NULL WHEN NULL THEN 1 ELSE 0 END;
+----
+0
+
+query I
+SELECT CASE WHEN 2>1 THEN 10 ELSE 20 END;
+----
+10
+
+# --- multi-column / multi-expression ---
+query II
+SELECT 1, 2;
+----
+1
+2
+
+query IT
+SELECT 1+1, 'x';
+----
+2
+x
+
+# --- statement ok / error records ---
+statement ok
+SELECT 1;
+
+statement error
+SELECT 1 +;
+
+statement error
+SELECT * FROM t;
+
+statement error
+CREATE TABLE t1(x);
+
+statement ok
+SELECT 'a', 1+1, NULL;

@@ -1,0 +1,41 @@
+# Hash expectation records — a3 acceptance data.
+# The runner validates `<N> values hashing to <md5>` per the sqllogictest
+# hash rule: MD5 over each rendered value followed by a single space.
+# For the same query, the hash form and the plaintext form must agree.
+
+# hash form
+query I
+SELECT 1;
+----
+1 values hashing to 9d9dff9320e27082b15b4ed7a086ba83
+
+# plaintext form of the same query — must give the same verdict
+query I
+SELECT 1;
+----
+1
+
+query I
+SELECT 1, 2;
+----
+2 values hashing to bbf9e4c11e2bc498bd1ed4ed686d646d
+
+query TTT
+SELECT 'a', 'b', NULL;
+----
+3 values hashing to a83ff48980ae41651298c6751783a005
+
+query I
+SELECT 1+2*3;
+----
+1 values hashing to ccb8ce9dd3b97cd45703005b5179ecc4
+
+query I
+SELECT 7/2;
+----
+1 values hashing to 09b8a5b7ab764f44404ddcc1a0c5b788
+
+query I
+SELECT NULL;
+----
+1 values hashing to b5ecf96336a98cda5af2d44ce917ecaa

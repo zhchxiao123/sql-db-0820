@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sql-db-0820"
+version = "0.1.0"
+description = "A sqlite-compatible database engine that passes the sqllogictest corpus (work in progress)"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+[project.scripts]
+sqllogictest-runner = "sqldb.runner:main"
+
+[tool.setuptools.packages.find]
+include = ["sqldb*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
