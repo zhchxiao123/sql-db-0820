@@ -180,7 +180,10 @@ KEYWORDS = {
     "FROM", "WHERE", "LIKE", "ESCAPE",
     "DISTINCT", "ORDER", "BY", "ASC", "DESC", "LIMIT", "OFFSET",
     "INDEX", "UNIQUE", "IF", "EXISTS", "ON", "DROP",
+    "GROUP", "HAVING", "COUNT", "SUM", "AVG", "MIN", "MAX", "TOTAL",
 }
+
+AGG_FUNCS = {"COUNT", "SUM", "AVG", "MIN", "MAX", "TOTAL"}
 
 _NUM_RE = re.compile(r"(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?")
 _OP2 = {"<=", ">=", "!=", "<>", "=="}
@@ -310,12 +313,38 @@ class RowContext:
         self.values = {c.name: v for c, v in zip(table.columns, row)}
 
     def value_of(self, name: str) -> Any:
-        if name not in self.values:
+        if name not in self.affinity:
             raise EngineError(f"no such column: {name}")
-        return self.values[name]
+        # .get: rows always carry every column, but a synthetic empty row
+        # (aggregation over an empty table) yields NULL for existing columns
+        return self.values.get(name)
 
     def affinity_of(self, name: str) -> str:
         return self.affinity.get(name, "NONE")
+
+
+class AggContext:
+    """Expression context for one GROUP BY group (or the single whole-table
+    group): plain column references resolve to a representative row (the
+    first row of the group, matching sqlite), while aggregate nodes compute
+    over every row of the group."""
+
+    __slots__ = ("table", "group_rows", "rep")
+
+    def __init__(self, table: Optional[Table], group_rows: List[List[Any]], rep: Optional[RowContext]):
+        self.table = table
+        self.group_rows = group_rows
+        self.rep = rep
+
+    def value_of(self, name: str) -> Any:
+        if self.rep is None:
+            raise EngineError(f"no such column: {name}")
+        return self.rep.value_of(name)
+
+    def affinity_of(self, name: str) -> str:
+        if self.rep is None:
+            return "NONE"
+        return self.rep.affinity_of(name)
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +462,21 @@ class Parser:
             if self.peek().kind == "kw" and self.peek().value == "WHERE":
                 self._next()
                 where = self.parse_expr()
+        group_by: Optional[List[Tuple]] = None
+        if self.peek().kind == "kw" and self.peek().value == "GROUP":
+            self._next()
+            self._expect_kw("BY")
+            group_by = []
+            while True:
+                group_by.append(self.parse_expr())
+                if self.peek().kind == "op" and self.peek().value == ",":
+                    self._next()
+                    continue
+                break
+        having: Optional[Tuple] = None
+        if self.peek().kind == "kw" and self.peek().value == "HAVING":
+            self._next()
+            having = self.parse_expr()
         order_by: Optional[List[Tuple[Tuple, bool]]] = None
         if self.peek().kind == "kw" and self.peek().value == "ORDER":
             self._next()
@@ -465,7 +509,7 @@ class Parser:
             else:
                 limit = (e1, None)
         self._finish()
-        return ("select", distinct, items, table_name, where, order_by, limit)
+        return ("select", distinct, items, table_name, where, group_by, having, order_by, limit)
 
     def parse_create_stmt(self) -> Tuple:
         self._expect_kw("CREATE")
@@ -713,6 +757,8 @@ class Parser:
                 return ("num", 0)
             if t.value == "CASE":
                 return self.parse_case()
+            if t.value in AGG_FUNCS:
+                return self.parse_agg_call()
             raise EngineError(f"unexpected keyword {t.value}")
         if t.kind == "op" and t.value == "(":
             self._next()
@@ -725,6 +771,31 @@ class Parser:
                 raise EngineError(f"unknown column or identifier {t.value!r} (no FROM clause)")
             return ("col", t.value.lower())
         raise EngineError(f"unexpected token {t.value!r}")
+
+    def parse_agg_call(self) -> Tuple:
+        name = self._next().value  # kw COUNT/SUM/AVG/MIN/MAX/TOTAL
+        self._expect_op("(")
+        distinct = False
+        if self.peek().kind == "kw" and self.peek().value == "DISTINCT":
+            self._next()
+            distinct = True
+        if self.peek().kind == "op" and self.peek().value == ")":
+            # COUNT() is COUNT(*) in sqlite; other functions reject no args.
+            self._next()
+            if name != "COUNT":
+                raise EngineError(f"wrong number of arguments to function {name}()")
+            return ("agg", name, None, distinct)
+        if self.peek().kind == "op" and self.peek().value == "*":
+            if distinct:
+                raise EngineError(f"wrong number of arguments to function {name}()")
+            self._next()
+            if name != "COUNT":
+                raise EngineError(f"wrong number of arguments to function {name}()")
+            self._expect_op(")")
+            return ("agg", name, None, distinct)
+        arg = self.parse_expr()
+        self._expect_op(")")
+        return ("agg", name, arg, distinct)
 
     def parse_case(self) -> Tuple:
         self._expect_kw("CASE")
@@ -922,6 +993,8 @@ def eval_expr(node: Tuple, ctx: Optional[RowContext] = None) -> Any:
         if ctx is None:
             raise EngineError(f"no such column: {node[1]}")
         return ctx.value_of(node[1])
+    if kind == "agg":
+        return _eval_agg(node, ctx)
     if kind == "neg":
         v = eval_expr(node[1], ctx)
         return None if v is None else -v
@@ -974,6 +1047,75 @@ def _case(base: Optional[Tuple], whens: List[Tuple[Tuple, Tuple]], else_: Option
     return None
 
 
+def _agg_row_ctx(table: Optional[Table], row: List[Any]) -> Optional[RowContext]:
+    """Row context for one row of an aggregate group; None when there is no
+    table (expression-only SELECT), where column references must error."""
+    if table is None:
+        return None
+    return RowContext(table, row)
+
+
+def _to_agg_number(v: Any) -> Any:
+    """Numeric conversion for SUM/AVG/TOTAL: text converts when possible,
+    non-numeric text contributes 0 (sqlite behavior, verified)."""
+    if is_number(v):
+        return v
+    if isinstance(v, str):
+        n = _text_to_number(v)
+        if n is not None:
+            return n
+        return 0.0  # non-numeric text contributes 0.0 (sqlite: SUM('abc') = 0.0)
+    return 0
+
+
+def _eval_agg(node: Tuple, ctx: Optional[Any]) -> Any:
+    name = node[1]
+    arg = node[2]
+    distinct = node[3]
+    if not isinstance(ctx, AggContext):
+        raise EngineError("misuse of aggregate function")
+    table = ctx.table
+    rows = ctx.group_rows
+    if name == "COUNT":
+        if arg is None:
+            return len(rows)
+        values = [eval_expr(arg, _agg_row_ctx(table, row)) for row in rows]
+        values = [v for v in values if v is not None]
+        if distinct:
+            values = list(dict.fromkeys(values))
+        return len(values)
+    if arg is None:
+        raise EngineError(f"wrong number of arguments to function {name}()")
+    values = [eval_expr(arg, _agg_row_ctx(table, row)) for row in rows]
+    non_null = [v for v in values if v is not None]
+    if distinct:
+        non_null = list(dict.fromkeys(non_null))
+    if name == "MIN":
+        best = None
+        for v in non_null:
+            if best is None or _binary_compare(v, best) < 0:
+                best = v
+        return best
+    if name == "MAX":
+        best = None
+        for v in non_null:
+            if best is None or _binary_compare(v, best) > 0:
+                best = v
+        return best
+    if name in ("SUM", "TOTAL", "AVG"):
+        nums = [_to_agg_number(v) for v in non_null]
+        total = 0
+        for v in nums:
+            total += v
+        if name == "SUM":
+            return None if not nums else total
+        if name == "TOTAL":
+            return float(total)
+        if name == "AVG":
+            return None if not nums else float(total) / len(nums)
+    raise EngineError(f"unknown aggregate {name}")  # pragma: no cover
+
+
 def _truthy(v: Any) -> bool:
     return v is not None and v != 0
 
@@ -988,6 +1130,17 @@ def _walk_expr_cols(node: Any):
     elif isinstance(node, list):
         for item in node:
             yield from _walk_expr_cols(item)
+
+
+def _contains_agg(node: Any) -> bool:
+    """True if an expression tree contains an aggregate node."""
+    if isinstance(node, tuple) and node:
+        if node[0] == "agg":
+            return True
+        return any(_contains_agg(child) for child in node[1:])
+    if isinstance(node, list):
+        return any(_contains_agg(item) for item in node)
+    return False
 
 
 def _output_width(items: List[Tuple], table: Optional[Table]) -> int:
@@ -1196,13 +1349,28 @@ class Engine:
         return StatementResult(rowcount=deleted)
 
     def _run_select(self, stmt: Tuple) -> StatementResult:
-        _, distinct, items, table_name, where, order_by, limit = stmt
+        _, distinct, items, table_name, where, group_by, having, order_by, limit = stmt
+        has_agg = (
+            group_by is not None
+            or having is not None
+            or any(_contains_agg(it) for it in items)
+            or bool(order_by and any(_contains_agg(t) for t, _a in order_by))
+        )
         if table_name is None:
-            # expression-only SELECT (no FROM): a single row
+            # expression-only SELECT (no FROM)
             if any(it[0] == "star" for it in items):
                 raise EngineError("SELECT * requires a FROM clause")
-            values = [eval_expr(e, None) for e in items]
-            proj: List[Tuple[List[Any], Optional[RowContext]]] = [(values, None)]
+            if has_agg:
+                # a single group containing one synthetic empty row
+                agg_ctx = AggContext(None, [[]], None)
+                if having is not None and not _truthy(eval_expr(having, agg_ctx)):
+                    proj: List[Tuple[List[Any], Optional[Any]]] = []
+                else:
+                    values = [eval_expr(e, agg_ctx) for e in items]
+                    proj = [(values, agg_ctx)]
+            else:
+                values = [eval_expr(e, None) for e in items]
+                proj = [(values, None)]
         else:
             table = self.tables.get(table_name)
             if table is None:
@@ -1221,21 +1389,57 @@ class Engine:
                     check_expr(item)
             if where is not None:
                 check_expr(where)
+            if group_by is not None:
+                for g in group_by:
+                    check_expr(g)
+            if having is not None:
+                check_expr(having)
             if order_by is not None:
                 for term, _asc in order_by:
                     check_expr(term)
-            proj = []
+            filtered: List[Tuple[List[Any], RowContext]] = []
             for row in table.rows:
                 ctx = RowContext(table, row)
                 if where is not None and not _truthy(eval_expr(where, ctx)):
                     continue
-                out: List[Any] = []
-                for item in items:
-                    if item[0] == "star":
-                        out.extend(row)
-                    else:
-                        out.append(eval_expr(item, ctx))
-                proj.append((out, ctx))
+                filtered.append((row, ctx))
+            if has_agg:
+                if group_by is not None:
+                    groups: Dict[Tuple, List[List[Any]]] = {}
+                    key_order: List[Tuple] = []
+                    for row, ctx in filtered:
+                        key = tuple(eval_expr(g, ctx) for g in group_by)
+                        if key not in groups:
+                            groups[key] = []
+                            key_order.append(key)
+                        groups[key].append(row)
+                    group_list = [(key, groups[key]) for key in key_order]
+                else:
+                    group_list = [(None, [row for row, _ctx in filtered])]
+                proj = []
+                for _key, group_rows in group_list:
+                    first_row = group_rows[0] if group_rows else []
+                    rep = RowContext(table, first_row)
+                    agg_ctx = AggContext(table, group_rows, rep)
+                    if having is not None and not _truthy(eval_expr(having, agg_ctx)):
+                        continue
+                    out: List[Any] = []
+                    for item in items:
+                        if item[0] == "star":
+                            out.extend(first_row)
+                        else:
+                            out.append(eval_expr(item, agg_ctx))
+                    proj.append((out, agg_ctx))
+            else:
+                proj = []
+                for row, ctx in filtered:
+                    out = []
+                    for item in items:
+                        if item[0] == "star":
+                            out.extend(row)
+                        else:
+                            out.append(eval_expr(item, ctx))
+                    proj.append((out, ctx))
         # DISTINCT: whole-row dedup; NULLs are equal, numbers compare
         # numerically (5 == 5.0), text is byte-wise (5 != '5').
         if distinct:
