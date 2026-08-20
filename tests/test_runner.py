@@ -238,6 +238,89 @@ class TestRunFile(unittest.TestCase):
         self.assertEqual(f, 1)
 
 
+# The repo's own sqllogictest corpus. The official sqllogictest corpus is not
+# vendored in this workspace (select*/random*/evidence* directories are
+# absent), so the acceptance corpus is the one bundled under tests/data.
+# These tests pin a1 (all success records green), a2 (deterministic) and
+# a3 (no skipped/filtered records) for that available corpus.
+SUCCESS_CORPUS = [
+    "aggregates.test",
+    "delete.test",
+    "distinct.test",
+    "expressions.test",
+    "groupby.test",
+    "hash.test",
+    "index.test",
+    "joins.test",
+    "limit.test",
+    "orderby.test",
+    "select1.test",
+    "statements.test",
+    "subquery.test",
+]
+
+# Files whose records are *expected* to fail (failure-path seam): they verify
+# that unsupported statements are judged as failed records, the runner keeps
+# going, and the CLI exits non-zero (a4). They are deliberately not part of
+# the green corpus.
+FAILURE_PATH_CORPUS = [
+    "agg_failures.test",
+    "failures.test",
+    "index_failures.test",
+    "join_failures.test",
+    "order_failures.test",
+    "malformed.test",
+]
+
+
+class TestAvailableCorpus(unittest.TestCase):
+    """a1/a3: every success record of the available corpus passes, nothing is
+    skipped, and the runner CLI exits 0 over the full success corpus."""
+
+    def test_success_corpus_all_green_no_skips(self):
+        for name in SUCCESS_CORPUS:
+            with self.subTest(file=name):
+                p, f, s = run_file(DATA / name, Engine(), verbose=False)
+                self.assertEqual(f, 0, name)
+                self.assertEqual(s, 0, f"{name} must not be skipped/filtered")
+
+    def test_success_corpus_cli_exit_zero(self):
+        code, out = run_cli(*(str(DATA / n) for n in SUCCESS_CORPUS))
+        self.assertEqual(code, 0, out)
+
+    def test_failure_path_corpus_still_fails(self):
+        # the failure-path files must keep failing (they encode the a4 seam),
+        # the runner must not swallow them into green.
+        for name in FAILURE_PATH_CORPUS:
+            with self.subTest(file=name):
+                p, f, s = run_file(DATA / name, Engine(), verbose=False)
+                self.assertGreater(f, 0, name)
+
+    def test_failure_path_cli_exit_nonzero(self):
+        code, out = run_cli(*(str(DATA / n) for n in FAILURE_PATH_CORPUS))
+        self.assertNotEqual(code, 0, out)
+
+
+class TestDeterminism(unittest.TestCase):
+    """a2: two consecutive full runs produce identical output."""
+
+    def _run_corpus_output(self, files):
+        code, out = run_cli(*(str(DATA / n) for n in files))
+        return code, out
+
+    def test_success_corpus_deterministic(self):
+        code1, out1 = self._run_corpus_output(SUCCESS_CORPUS)
+        code2, out2 = self._run_corpus_output(SUCCESS_CORPUS)
+        self.assertEqual(code1, code2)
+        self.assertEqual(out1, out2)
+
+    def test_failure_path_corpus_deterministic(self):
+        code1, out1 = self._run_corpus_output(FAILURE_PATH_CORPUS)
+        code2, out2 = self._run_corpus_output(FAILURE_PATH_CORPUS)
+        self.assertEqual(code1, code2)
+        self.assertEqual(out1, out2)
+
+
 class TestCliExitCode(unittest.TestCase):
     def test_all_pass_exit_zero(self):
         code, out = run_cli(

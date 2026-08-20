@@ -147,3 +147,22 @@ Declared column types map to affinities (`INT` -> INTEGER, `CHAR/CLOB/TEXT`
 sqlite3 (Python stdlib) and asserts our engine's rendered output matches
 line by line — this pins the affinity/comparison/LIKE semantics to actual
 sqlite behavior.
+
+### Bundled sqllogictest corpus
+
+The official sqllogictest corpus is not vendored in this workspace; the
+acceptance corpus is the one bundled under `tests/data/`:
+
+* **success corpus** (`aggregates` `delete` `distinct` `expressions`
+  `groupby` `hash` `index` `joins` `limit` `orderby` `select1` `statements`
+  `subquery`) — every record passes, no records are skipped:
+  `python sqllogictest_runner.py tests/data/aggregates.test ... tests/data/subquery.test`
+  exits 0.
+* **failure-path corpus** (`*_failures.test`, `malformed.test`) — records are
+  *expected* to fail: they verify unsupported statements are judged as failed
+  records, the runner keeps going, and the CLI exits non-zero.
+
+Running the success corpus twice yields identical output (deterministic; the
+engine uses no randomness). `tests/test_runner.py` pins these properties:
+all success records green with zero skips, CLI exit 0, and byte-identical
+output across two runs.
