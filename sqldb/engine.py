@@ -8,6 +8,12 @@ Built on the expression engine from slice 0. This slice adds:
   * SELECT with FROM and WHERE; column references in expressions; ``*``
   * sqlite type affinity: storage conversion and comparison rules
   * LIKE / NOT LIKE (ASCII case-insensitive, % _ wildcards, ESCAPE)
+  * multi-table FROM: INNER/LEFT [OUTER]/CROSS JOIN, comma-separated tables,
+    ON and USING conditions (join conditions reuse the expression engine)
+  * qualified column references (``t.c``) and qualified star (``t.*``)
+  * sqlite join semantics: NULL never matches (even NULL), LEFT JOIN pads
+    unmatched rows with NULL, USING columns are merged for ``*`` and for
+    unqualified references, ambiguous columns are rejected
 
 Value model (mirrors SQLite storage classes):
     None   -> SQL NULL
@@ -181,13 +187,14 @@ KEYWORDS = {
     "DISTINCT", "ORDER", "BY", "ASC", "DESC", "LIMIT", "OFFSET",
     "INDEX", "UNIQUE", "IF", "EXISTS", "ON", "DROP",
     "GROUP", "HAVING", "COUNT", "SUM", "AVG", "MIN", "MAX", "TOTAL",
+    "JOIN", "INNER", "LEFT", "OUTER", "CROSS", "USING",
 }
 
 AGG_FUNCS = {"COUNT", "SUM", "AVG", "MIN", "MAX", "TOTAL"}
 
 _NUM_RE = re.compile(r"(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?")
 _OP2 = {"<=", ">=", "!=", "<>", "=="}
-_OP1 = set("+-*/%()=,;<>")
+_OP1 = set("+-*/%()=,;<>.")
 
 
 class Token:
@@ -311,6 +318,10 @@ class RowContext:
     def __init__(self, table: Table, row: List[Any]):
         self.affinity = {c.name: c.affinity for c in table.columns}
         self.values = {c.name: v for c, v in zip(table.columns, row)}
+        # sqlite also accepts the qualified form ``table.col`` in single-table
+        # queries; registering both spellings keeps value/affinity lookup uniform.
+        self.affinity.update({f"{table.name}.{c.name}": c.affinity for c in table.columns})
+        self.values.update({f"{table.name}.{c.name}": v for c, v in zip(table.columns, row)})
 
     def value_of(self, name: str) -> Any:
         if name not in self.affinity:
@@ -323,16 +334,140 @@ class RowContext:
         return self.affinity.get(name, "NONE")
 
 
+class JoinContext:
+    """Binds one combined joined row (one row per FROM table) to column names.
+
+    Resolution follows sqlite:
+      * ``t.c`` addresses table t directly (error when t is not in the FROM
+        list or c is not a column of t);
+      * unqualified names must be unambiguous: a column merged through a
+        USING join counts as one occurrence and resolves to the leftmost
+        table of its merged component; a name present in several tables that
+        are not merged together is ``ambiguous column name``.
+    """
+
+    __slots__ = ("tables", "merged_cols", "rows", "_colmaps")
+
+    def __init__(self, tables: List[Table], merged_cols: Dict[str, List[List[int]]],
+                 rows: List[List[Any]]):
+        self.tables = tables
+        self.merged_cols = merged_cols
+        self.rows = rows
+        self._colmaps = [{c.name: i for i, c in enumerate(t.columns)} for t in tables]
+
+    def _resolve(self, name: str) -> Tuple[int, int]:
+        if "." in name:
+            tname, cname = name.split(".", 1)
+            for ti, t in enumerate(self.tables):
+                if t.name == tname:
+                    cm = self._colmaps[ti]
+                    if cname in cm:
+                        return ti, cm[cname]
+                    raise EngineError(f"no such column: {name}")
+            raise EngineError(f"no such column: {name}")
+        ti = _resolve_unqualified(self.tables, self._colmaps, self.merged_cols, name)
+        return ti, self._colmaps[ti][name]
+
+    def value_of(self, name: str) -> Any:
+        ti, ci = self._resolve(name)
+        row = self.rows[ti]
+        # synthetic empty row (aggregation over an empty join) yields NULL
+        return row[ci] if ci < len(row) else None
+
+    def affinity_of(self, name: str) -> str:
+        ti, ci = self._resolve(name)
+        return self.tables[ti].columns[ci].affinity
+
+
+def _resolve_unqualified(tables: List[Table], colmaps: List[Dict[str, int]],
+                         merged_cols: Dict[str, List[List[int]]], name: str) -> int:
+    """Table index for an unqualified column name, or raise like sqlite.
+
+    Tables connected by USING on ``name`` form one merged component and count
+    as a single occurrence; the component resolves to its leftmost table.
+    """
+    present = [ti for ti, cm in enumerate(colmaps) if name in cm]
+    if not present:
+        raise EngineError(f"no such column: {name}")
+    comps = merged_cols.get(name)
+    if comps:
+        groups: Dict[Optional[int], List[int]] = {}
+        for ti in present:
+            key = next((ci for ci, comp in enumerate(comps) if ti in comp), None)
+            groups.setdefault(key, []).append(ti)
+        if len(groups) > 1:
+            raise EngineError(f"ambiguous column name: {name}")
+        idxs = next(iter(groups.values()))
+    else:
+        if len(present) > 1:
+            raise EngineError(f"ambiguous column name: {name}")
+        idxs = present
+    return min(idxs)
+
+
+def _merged_components(pairs_by_col: Dict[str, List[Tuple[int, int]]]) -> Dict[str, List[List[int]]]:
+    """USING pairs -> connected components per column name.
+
+    ``t1 JOIN t2 USING (k) JOIN t3 USING (k)`` merges k across all three
+    tables, so overlapping pairs must be unioned (union-find)."""
+    out: Dict[str, List[List[int]]] = {}
+    for cn, pairs in pairs_by_col.items():
+        parent: Dict[int, int] = {}
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        for a, b in pairs:
+            parent.setdefault(a, a)
+            parent.setdefault(b, b)
+            union(a, b)
+        comps: Dict[int, List[int]] = {}
+        for ti in parent:
+            comps.setdefault(find(ti), []).append(ti)
+        out[cn] = [sorted(v) for v in comps.values()]
+    return out
+
+
+def _resolve_col(tables: List[Table], colmaps: List[Dict[str, int]],
+                 merged_cols: Dict[str, List[List[int]]], name: str) -> None:
+    """Raise unless ``name`` resolves against the visible tables (sqlite
+    resolves columns at prepare time). Used for up-front validation."""
+    if "." in name:
+        tname, cname = name.split(".", 1)
+        for ti, t in enumerate(tables):
+            if t.name == tname:
+                if cname in colmaps[ti]:
+                    return
+                raise EngineError(f"no such column: {name}")
+        raise EngineError(f"no such column: {name}")
+    _resolve_unqualified(tables, colmaps, merged_cols, name)
+
+
 class AggContext:
     """Expression context for one GROUP BY group (or the single whole-table
     group): plain column references resolve to a representative row (the
     first row of the group, matching sqlite), while aggregate nodes compute
-    over every row of the group."""
+    over every row of the group.
 
-    __slots__ = ("table", "group_rows", "rep")
+    ``tables``/``merged_cols`` describe the FROM clause (empty for
+    expression-only SELECT); ``group_rows`` holds combined rows (one list of
+    values per table, aligned with ``tables``).
+    """
 
-    def __init__(self, table: Optional[Table], group_rows: List[List[Any]], rep: Optional[RowContext]):
-        self.table = table
+    __slots__ = ("tables", "merged_cols", "group_rows", "rep")
+
+    def __init__(self, tables: List[Table], merged_cols: Dict[str, List[List[int]]],
+                 group_rows: List[List[List[Any]]], rep: Optional[Any]):
+        self.tables = tables
+        self.merged_cols = merged_cols
         self.group_rows = group_rows
         self.rep = rep
 
@@ -453,12 +588,55 @@ class Parser:
                 self._next()
                 continue
             break
-        table_name: Optional[str] = None
+        from_clause: Optional[List[Tuple]] = None
         where: Optional[Tuple] = None
         if self.peek().kind == "kw" and self.peek().value == "FROM":
             self._next()
-            table_name = self._name()
+            from_clause = [("table", self._name())]
             self.allow_columns = True
+            while True:
+                t = self.peek()
+                if t.kind == "op" and t.value == ",":
+                    self._next()
+                    from_clause.append(("table", self._name()))
+                elif t.kind == "kw" and t.value in ("JOIN", "INNER", "LEFT", "CROSS"):
+                    if t.value == "JOIN":
+                        self._next()
+                        jtype = "inner"
+                    elif t.value == "INNER":
+                        self._next()
+                        self._expect_kw("JOIN")
+                        jtype = "inner"
+                    elif t.value == "LEFT":
+                        self._next()
+                        if self.peek().kind == "kw" and self.peek().value == "OUTER":
+                            self._next()
+                        self._expect_kw("JOIN")
+                        jtype = "left"
+                    else:  # CROSS
+                        self._next()
+                        self._expect_kw("JOIN")
+                        jtype = "cross"
+                    tname = self._name()
+                    cond: Optional[Tuple] = None
+                    if self.peek().kind == "kw" and self.peek().value == "ON":
+                        self._next()
+                        cond = ("on", self.parse_expr())
+                    elif self.peek().kind == "kw" and self.peek().value == "USING":
+                        self._next()
+                        self._expect_op("(")
+                        cols: List[str] = []
+                        while True:
+                            cols.append(self._name())
+                            if self.peek().kind == "op" and self.peek().value == ",":
+                                self._next()
+                                continue
+                            break
+                        self._expect_op(")")
+                        cond = ("using", cols)
+                    from_clause.append(("join", jtype, tname, cond))
+                else:
+                    break
             if self.peek().kind == "kw" and self.peek().value == "WHERE":
                 self._next()
                 where = self.parse_expr()
@@ -509,7 +687,7 @@ class Parser:
             else:
                 limit = (e1, None)
         self._finish()
-        return ("select", distinct, items, table_name, where, group_by, having, order_by, limit)
+        return ("select", distinct, items, from_clause, where, group_by, having, order_by, limit)
 
     def parse_create_stmt(self) -> Tuple:
         self._expect_kw("CREATE")
@@ -767,6 +945,20 @@ class Parser:
             return e
         if t.kind == "id":
             self._next()
+            if self.peek().kind == "op" and self.peek().value == ".":
+                self._next()
+                nxt = self.peek()
+                if nxt.kind == "op" and nxt.value == "*":
+                    self._next()
+                    if not self.allow_columns:
+                        raise EngineError(f"unknown column or identifier {t.value!r} (no FROM clause)")
+                    return ("qualstar", t.value.lower())
+                if nxt.kind in ("id", "kw"):
+                    self._next()
+                    if not self.allow_columns:
+                        raise EngineError(f"unknown column or identifier {t.value!r} (no FROM clause)")
+                    return ("col", t.value.lower() + "." + nxt.value.lower())
+                raise EngineError("expected column name after '.'")
             if not self.allow_columns:
                 raise EngineError(f"unknown column or identifier {t.value!r} (no FROM clause)")
             return ("col", t.value.lower())
@@ -1047,12 +1239,16 @@ def _case(base: Optional[Tuple], whens: List[Tuple[Tuple, Tuple]], else_: Option
     return None
 
 
-def _agg_row_ctx(table: Optional[Table], row: List[Any]) -> Optional[RowContext]:
-    """Row context for one row of an aggregate group; None when there is no
-    table (expression-only SELECT), where column references must error."""
-    if table is None:
+def _frame_ctx(tables: List[Table], merged_cols: Dict[str, List[List[int]]],
+               frame: List[List[Any]]) -> Optional[Any]:
+    """Expression context for one combined row of a FROM clause: None when
+    there is no table (expression-only SELECT), a RowContext for a single
+    table, a JoinContext otherwise."""
+    if not tables:
         return None
-    return RowContext(table, row)
+    if len(tables) == 1:
+        return RowContext(tables[0], frame[0])
+    return JoinContext(tables, merged_cols, frame)
 
 
 def _to_agg_number(v: Any) -> Any:
@@ -1074,19 +1270,20 @@ def _eval_agg(node: Tuple, ctx: Optional[Any]) -> Any:
     distinct = node[3]
     if not isinstance(ctx, AggContext):
         raise EngineError("misuse of aggregate function")
-    table = ctx.table
+    tables = ctx.tables
+    merged_cols = ctx.merged_cols
     rows = ctx.group_rows
     if name == "COUNT":
         if arg is None:
             return len(rows)
-        values = [eval_expr(arg, _agg_row_ctx(table, row)) for row in rows]
+        values = [eval_expr(arg, _frame_ctx(tables, merged_cols, frame)) for frame in rows]
         values = [v for v in values if v is not None]
         if distinct:
             values = list(dict.fromkeys(values))
         return len(values)
     if arg is None:
         raise EngineError(f"wrong number of arguments to function {name}()")
-    values = [eval_expr(arg, _agg_row_ctx(table, row)) for row in rows]
+    values = [eval_expr(arg, _frame_ctx(tables, merged_cols, frame)) for frame in rows]
     non_null = [v for v in values if v is not None]
     if distinct:
         non_null = list(dict.fromkeys(non_null))
@@ -1143,12 +1340,63 @@ def _contains_agg(node: Any) -> bool:
     return False
 
 
-def _output_width(items: List[Tuple], table: Optional[Table]) -> int:
+def _expand_star(tables: List[Table], colmaps: List[Dict[str, int]],
+                 merged_cols: Dict[str, List[List[int]]]) -> List[Tuple[int, str]]:
+    """Columns a bare ``*`` expands to, in FROM order. A USING-merged column
+    appears once per merged component, at the position of its leftmost table;
+    tables outside the component keep their own copy (sqlite behavior)."""
+    out: List[Tuple[int, str]] = []
+    emitted: set = set()  # (column name, component id) already emitted
+    for ti, t in enumerate(tables):
+        for c in t.columns:
+            name = c.name
+            if name in merged_cols:
+                comp_id = next(
+                    (ci for ci, comp in enumerate(merged_cols[name]) if ti in comp),
+                    None,
+                )
+                if comp_id is not None:
+                    key = (name, comp_id)
+                    if key in emitted:
+                        continue
+                    emitted.add(key)
+            out.append((ti, name))
+    return out
+
+
+def _project_items(items: List[Tuple], tables: List[Table], colmaps: List[Dict[str, int]],
+                   merged_cols: Dict[str, List[List[int]]], frame: List[List[Any]],
+                   ctx: Optional[Any]) -> List[Any]:
+    """Evaluate a select list against one combined row. ``*`` expands via the
+    FROM tables, ``t.*`` expands one table's columns verbatim, anything else
+    is an expression evaluated with ``ctx``."""
+    out: List[Any] = []
+    for item in items:
+        if item[0] == "star":
+            for ti, cn in _expand_star(tables, colmaps, merged_cols):
+                row = frame[ti]
+                ci = colmaps[ti][cn]
+                out.append(row[ci] if ci < len(row) else None)
+        elif item[0] == "qualstar":
+            tname = item[1]
+            ti = next(i for i, t in enumerate(tables) if t.name == tname)
+            out.extend(frame[ti])
+        else:
+            out.append(eval_expr(item, ctx))
+    return out
+
+
+def _output_width(items: List[Tuple], tables: List[Table], colmaps: List[Dict[str, int]],
+                  merged_cols: Dict[str, List[List[int]]]) -> int:
     """Number of output columns of a select list (for ORDER BY ordinals)."""
     width = 0
     for item in items:
         if item[0] == "star":
-            width += len(table.columns)
+            width += len(_expand_star(tables, colmaps, merged_cols))
+        elif item[0] == "qualstar":
+            tname = item[1]
+            ti = next(i for i, t in enumerate(tables) if t.name == tname)
+            width += len(tables[ti].columns)
         else:
             width += 1
     return width
@@ -1349,20 +1597,23 @@ class Engine:
         return StatementResult(rowcount=deleted)
 
     def _run_select(self, stmt: Tuple) -> StatementResult:
-        _, distinct, items, table_name, where, group_by, having, order_by, limit = stmt
+        _, distinct, items, from_clause, where, group_by, having, order_by, limit = stmt
         has_agg = (
             group_by is not None
             or having is not None
             or any(_contains_agg(it) for it in items)
             or bool(order_by and any(_contains_agg(t) for t, _a in order_by))
         )
-        if table_name is None:
+        if from_clause is None:
             # expression-only SELECT (no FROM)
-            if any(it[0] == "star" for it in items):
+            tables: List[Table] = []
+            colmaps: List[Dict[str, int]] = []
+            merged_cols: Dict[str, List[List[int]]] = {}
+            if any(it[0] in ("star", "qualstar") for it in items):
                 raise EngineError("SELECT * requires a FROM clause")
             if has_agg:
                 # a single group containing one synthetic empty row
-                agg_ctx = AggContext(None, [[]], None)
+                agg_ctx = AggContext([], {}, [[]], None)
                 if having is not None and not _truthy(eval_expr(having, agg_ctx)):
                     proj: List[Tuple[List[Any], Optional[Any]]] = []
                 else:
@@ -1372,73 +1623,145 @@ class Engine:
                 values = [eval_expr(e, None) for e in items]
                 proj = [(values, None)]
         else:
-            table = self.tables.get(table_name)
-            if table is None:
-                raise EngineError(f"no such table: {table_name}")
+            # resolve FROM sources: plain tables plus join steps
+            # (jtype, table_index, condition); conditions are
+            # ('on', expr) | ('using', [col, ...]) | None (always true).
+            tables = []
+            steps: List[Tuple[str, int, Optional[Tuple]]] = []
+            merged_cols = {}
+            using_pairs: Dict[str, List[Tuple[int, int]]] = {}
+            for src in from_clause:
+                if src[0] == "table":
+                    t = self.tables.get(src[1])
+                    if t is None:
+                        raise EngineError(f"no such table: {src[1]}")
+                    if any(existing.name == t.name for existing in tables):
+                        # no alias support yet: a repeated table name cannot be
+                        # disambiguated (sqlite rejects it too)
+                        raise EngineError(f"table {t.name} specified more than once")
+                    tables.append(t)
+                    if len(tables) > 1:
+                        # comma-separated FROM sources are CROSS JOIN steps
+                        steps.append(("cross", len(tables) - 1, None))
+                else:  # ('join', jtype, name, cond)
+                    _jtype, tname, cond = src[1], src[2], src[3]
+                    t = self.tables.get(tname)
+                    if t is None:
+                        raise EngineError(f"no such table: {tname}")
+                    if any(existing.name == t.name for existing in tables):
+                        raise EngineError(f"table {t.name} specified more than once")
+                    idx = len(tables)
+                    tables.append(t)
+                    if cond is not None and cond[0] == "using":
+                        left_cols = {c.name for c in tables[idx - 1].columns}
+                        right_cols = {c.name for c in tables[idx].columns}
+                        for cn in cond[1]:
+                            if cn not in left_cols or cn not in right_cols:
+                                raise EngineError(
+                                    f"cannot join using column {cn} - column not "
+                                    f"present in both tables"
+                                )
+                            using_pairs.setdefault(cn, []).append((idx - 1, idx))
+                    steps.append((_jtype, idx, cond))
+            merged_cols = _merged_components(using_pairs)
+            colmaps = [{c.name: i for i, c in enumerate(t.columns)} for t in tables]
+
             # validate column references up front (sqlite resolves columns at
-            # prepare time, so an empty table must still reject bad columns)
-            known = {c.name for c in table.columns}
-
-            def check_expr(e: Tuple) -> None:
+            # prepare time, so an empty table must still reject bad columns).
+            # ON conditions of a join step may only see the tables joined so
+            # far (left side + the step's right table).
+            def check_expr(e: Tuple, visible: int) -> None:
                 for col in _walk_expr_cols(e):
-                    if col not in known:
-                        raise EngineError(f"no such column: {col}")
+                    _resolve_col(tables[:visible], colmaps[:visible], merged_cols, col)
 
-            for item in items:
-                if item[0] != "star":
-                    check_expr(item)
+            def check_items(visible: int) -> None:
+                for item in items:
+                    if item[0] == "qualstar":
+                        if not any(t.name == item[1] for t in tables[:visible]):
+                            raise EngineError(f"no such table: {item[1]}")
+                    elif item[0] != "star":
+                        check_expr(item, visible)
+
+            check_items(len(tables))
             if where is not None:
-                check_expr(where)
+                check_expr(where, len(tables))
             if group_by is not None:
                 for g in group_by:
-                    check_expr(g)
+                    check_expr(g, len(tables))
             if having is not None:
-                check_expr(having)
+                check_expr(having, len(tables))
             if order_by is not None:
                 for term, _asc in order_by:
-                    check_expr(term)
-            filtered: List[Tuple[List[Any], RowContext]] = []
-            for row in table.rows:
-                ctx = RowContext(table, row)
+                    check_expr(term, len(tables))
+            for _jtype, idx, cond in steps:
+                if cond is not None and cond[0] == "on":
+                    check_expr(cond[1], idx + 1)
+
+            # nested-loop join. A combined row ("frame") is one list of values
+            # per table, aligned with ``tables``. LEFT JOIN keeps every left
+            # row that found no match, padded with NULLs for the right side.
+            frames: List[List[List[Any]]] = [[row] for row in tables[0].rows]
+            for jtype, idx, cond in steps:
+                right = tables[idx]
+                new_frames: List[List[List[Any]]] = []
+                for frame in frames:
+                    matched_any = False
+                    for rrow in right.rows:
+                        cand = frame + [rrow]
+                        ctx = _frame_ctx(tables[:idx + 1], merged_cols, cand)
+                        ok = True
+                        if cond is not None and cond[0] == "on":
+                            ok = _truthy(eval_expr(cond[1], ctx))
+                        elif cond is not None and cond[0] == "using":
+                            for cn in cond[1]:
+                                eq = (
+                                    "cmp", "=",
+                                    ("col", tables[idx - 1].name + "." + cn),
+                                    ("col", tables[idx].name + "." + cn),
+                                )
+                                if not _truthy(eval_expr(eq, ctx)):
+                                    ok = False
+                                    break
+                        if ok:
+                            matched_any = True
+                            new_frames.append(cand)
+                    if jtype == "left" and not matched_any:
+                        new_frames.append(frame + [[None] * len(right.columns)])
+                frames = new_frames
+
+            filtered: List[Tuple[List[List[Any]], Any]] = []
+            for frame in frames:
+                ctx = _frame_ctx(tables, merged_cols, frame)
                 if where is not None and not _truthy(eval_expr(where, ctx)):
                     continue
-                filtered.append((row, ctx))
+                filtered.append((frame, ctx))
+
             if has_agg:
                 if group_by is not None:
-                    groups: Dict[Tuple, List[List[Any]]] = {}
+                    groups: Dict[Tuple, List[List[List[Any]]]] = {}
                     key_order: List[Tuple] = []
-                    for row, ctx in filtered:
+                    for frame, ctx in filtered:
                         key = tuple(eval_expr(g, ctx) for g in group_by)
                         if key not in groups:
                             groups[key] = []
                             key_order.append(key)
-                        groups[key].append(row)
+                        groups[key].append(frame)
                     group_list = [(key, groups[key]) for key in key_order]
                 else:
-                    group_list = [(None, [row for row, _ctx in filtered])]
+                    group_list = [(None, [frame for frame, _ctx in filtered])]
                 proj = []
                 for _key, group_rows in group_list:
-                    first_row = group_rows[0] if group_rows else []
-                    rep = RowContext(table, first_row)
-                    agg_ctx = AggContext(table, group_rows, rep)
+                    first_frame = group_rows[0] if group_rows else [[] for _ in tables]
+                    rep = _frame_ctx(tables, merged_cols, first_frame)
+                    agg_ctx = AggContext(tables, merged_cols, group_rows, rep)
                     if having is not None and not _truthy(eval_expr(having, agg_ctx)):
                         continue
-                    out: List[Any] = []
-                    for item in items:
-                        if item[0] == "star":
-                            out.extend(first_row)
-                        else:
-                            out.append(eval_expr(item, agg_ctx))
+                    out = _project_items(items, tables, colmaps, merged_cols, first_frame, agg_ctx)
                     proj.append((out, agg_ctx))
             else:
                 proj = []
-                for row, ctx in filtered:
-                    out = []
-                    for item in items:
-                        if item[0] == "star":
-                            out.extend(row)
-                        else:
-                            out.append(eval_expr(item, ctx))
+                for frame, ctx in filtered:
+                    out = _project_items(items, tables, colmaps, merged_cols, frame, ctx)
                     proj.append((out, ctx))
         # DISTINCT: whole-row dedup; NULLs are equal, numbers compare
         # numerically (5 == 5.0), text is byte-wise (5 != '5').
@@ -1456,7 +1779,7 @@ class Engine:
         # Integer literals are 1-based ordinals of the output row. A stable
         # multi-pass sort (rightmost term first) gives per-column ASC/DESC.
         if order_by:
-            width = _output_width(items, table if table_name is not None else None)
+            width = _output_width(items, tables, colmaps, merged_cols)
             for i, (term, _asc) in enumerate(order_by, start=1):
                 if term[0] == "num" and isinstance(term[1], int):
                     idx = term[1]

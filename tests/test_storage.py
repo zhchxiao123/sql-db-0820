@@ -270,7 +270,9 @@ class TestFailures(unittest.TestCase):
     def test_unsupported_statements(self):
         self.assert_error("UPDATE t SET a=1;")
         self.assert_error("DROP TABLE t;")
-        self.assert_error("SELECT * FROM t JOIN u;", "unexpected")
+        # JOIN is supported since the join slice: the statement parses and the
+        # failure moves to table resolution (a5 graceful-failure path).
+        self.assert_error("SELECT * FROM t JOIN u;", "no such table")
 
 
 if __name__ == "__main__":

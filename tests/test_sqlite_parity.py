@@ -369,6 +369,162 @@ class SqliteParityTest(unittest.TestCase):
             "CREATE INDEX;",
         ])
 
+    # -- slice 4: multi-table JOINs ----------------------------------------------
+
+    def test_join_inner_battery(self):
+        self.assert_parity([
+            "CREATE TABLE t1(a INTEGER, b TEXT);",
+            "CREATE TABLE t2(a INTEGER, c TEXT);",
+            "INSERT INTO t1 VALUES (1,'x'),(2,'y'),(3,'z');",
+            "INSERT INTO t2 VALUES (2,'p'),(3,'q'),(4,'r');",
+            "SELECT * FROM t1 JOIN t2 ON t1.a = t2.a ORDER BY t1.a;",
+            "SELECT t1.a, t2.c FROM t1 INNER JOIN t2 ON t1.a = t2.a ORDER BY t1.a;",
+            # NULL keys never match (not even NULL = NULL)
+            "CREATE TABLE n(a INTEGER);",
+            "INSERT INTO n VALUES (1),(NULL),(2);",
+            "SELECT * FROM t1 JOIN n ON t1.a = n.a ORDER BY t1.a;",
+            # range + composite conditions reuse the expression engine
+            "CREATE TABLE r(x INTEGER, y INTEGER);",
+            "INSERT INTO r VALUES (0,25),(2,15),(5,5);",
+            "SELECT * FROM t1 JOIN r ON t1.a >= r.x AND t1.a <= r.y ORDER BY t1.a, r.x;",
+            "SELECT * FROM t1 JOIN r ON t1.a < r.x AND t1.b > 'w' ORDER BY t1.a, r.x;",
+            # no matches
+            "CREATE TABLE m(a INTEGER);",
+            "INSERT INTO m VALUES (9);",
+            "SELECT COUNT(*) FROM t1 JOIN m ON t1.a = m.a;",
+        ])
+
+    def test_join_left_battery(self):
+        self.assert_parity([
+            "CREATE TABLE t1(a INTEGER);",
+            "CREATE TABLE t2(a INTEGER, c TEXT);",
+            "INSERT INTO t1 VALUES (1),(2),(3);",
+            "INSERT INTO t2 VALUES (2,'p'),(3,'q');",
+            "SELECT * FROM t1 LEFT JOIN t2 ON t1.a = t2.a ORDER BY t1.a;",
+            "SELECT * FROM t1 LEFT OUTER JOIN t2 ON t1.a = t2.a ORDER BY t1.a;",
+            "SELECT t1.a, t2.c FROM t1 LEFT JOIN t2 ON t1.a = t2.a WHERE t2.a IS NULL ORDER BY t1.a;",
+            # left row with a NULL key does not match the right NULL key
+            "CREATE TABLE n(a INTEGER, c TEXT);",
+            "INSERT INTO n VALUES (1,'p'),(NULL,'q');",
+            "SELECT * FROM t1 LEFT JOIN n ON t1.a = n.a ORDER BY t1.a;",
+            # ON false keeps every left row, NULL-padded
+            "SELECT * FROM t1 LEFT JOIN t2 ON 0 ORDER BY t1.a;",
+            # empty right side: all left rows NULL-padded
+            "CREATE TABLE e(a INTEGER);",
+            "SELECT t1.a, e.a FROM t1 LEFT JOIN e ON t1.a = e.a ORDER BY t1.a;",
+            "SELECT COUNT(*) FROM t1 LEFT JOIN e;",
+        ])
+
+    def test_join_cross_comma_battery(self):
+        self.assert_parity([
+            "CREATE TABLE t1(a INTEGER);",
+            "CREATE TABLE t2(b INTEGER);",
+            "INSERT INTO t1 VALUES (1),(2);",
+            "INSERT INTO t2 VALUES (10),(20),(30);",
+            "SELECT * FROM t1 CROSS JOIN t2 ORDER BY t1.a, t2.b;",
+            "SELECT * FROM t1, t2 ORDER BY t1.a, t2.b;",
+            "SELECT COUNT(*) FROM t1, t2;",
+            "SELECT t1.a, t2.b FROM t1, t2 WHERE t1.a = t2.b/10 ORDER BY t1.a;",
+            "SELECT * FROM t1 JOIN t2 ORDER BY t1.a, t2.b;",
+            "CREATE TABLE t3(c INTEGER);",
+            "INSERT INTO t3 VALUES (100),(200);",
+            "SELECT COUNT(*) FROM t1, t2 CROSS JOIN t3;",
+        ])
+
+    def test_join_using_battery(self):
+        self.assert_parity([
+            "CREATE TABLE t1(a INTEGER, b TEXT);",
+            "CREATE TABLE t2(a INTEGER, c TEXT);",
+            "INSERT INTO t1 VALUES (1,'x'),(2,'y');",
+            "INSERT INTO t2 VALUES (2,'p'),(3,'q');",
+            "SELECT * FROM t1 JOIN t2 USING (a) ORDER BY a;",
+            "SELECT a, b, c FROM t1 JOIN t2 USING (a) ORDER BY a;",
+            "SELECT t1.a, t2.a FROM t1 JOIN t2 USING (a) ORDER BY t1.a;",
+            "SELECT a, b, c FROM t1 LEFT JOIN t2 USING (a) ORDER BY a;",
+            "SELECT * FROM t1 JOIN t2 USING (a) WHERE a > 1 ORDER BY a;",
+            "SELECT b FROM t1 JOIN t2 USING (a) WHERE a = 2;",
+            # merged column not first in either table
+            "CREATE TABLE u1(p INTEGER, a INTEGER, q INTEGER);",
+            "CREATE TABLE u2(r INTEGER, a INTEGER, s INTEGER);",
+            "INSERT INTO u1 VALUES (1,5,2);",
+            "INSERT INTO u2 VALUES (3,5,4);",
+            "SELECT * FROM u1 JOIN u2 USING (a);",
+            # extra same-name column that is not merged stays ambiguous / qualified
+            "CREATE TABLE v1(k INTEGER, x INTEGER);",
+            "CREATE TABLE v2(k INTEGER, x INTEGER);",
+            "INSERT INTO v1 VALUES (1,10);",
+            "INSERT INTO v2 VALUES (1,20);",
+            "SELECT * FROM v1 JOIN v2 USING (k);",
+            "SELECT t1.x, t2.x FROM v1 JOIN v2 USING (k);",
+        ])
+
+    def test_join_multitable_battery(self):
+        self.assert_parity([
+            "CREATE TABLE t1(a INTEGER);",
+            "CREATE TABLE t2(a INTEGER, b INTEGER);",
+            "CREATE TABLE t3(b INTEGER, c INTEGER);",
+            "INSERT INTO t1 VALUES (1),(2);",
+            "INSERT INTO t2 VALUES (1,10),(2,20);",
+            "INSERT INTO t3 VALUES (10,100),(20,200);",
+            "SELECT * FROM t1 JOIN t2 ON t1.a = t2.a JOIN t3 ON t2.b = t3.b ORDER BY t1.a;",
+            "SELECT * FROM t1, t2 JOIN t3 ON t2.a = t3.b;",
+            # USING chain merges k across all three tables
+            "CREATE TABLE s1(k INTEGER, a INTEGER);",
+            "CREATE TABLE s2(k INTEGER, b INTEGER);",
+            "CREATE TABLE s3(k INTEGER, c INTEGER);",
+            "INSERT INTO s1 VALUES (1,10);",
+            "INSERT INTO s2 VALUES (1,20);",
+            "INSERT INTO s3 VALUES (1,30);",
+            "SELECT * FROM s1 JOIN s2 USING (k) JOIN s3 USING (k);",
+            "SELECT k FROM s1 JOIN s2 USING (k) JOIN s3 USING (k);",
+            # LEFT JOIN then INNER JOIN filters the padded rows
+            "CREATE TABLE l(a INTEGER, b INTEGER);",
+            "INSERT INTO l VALUES (1,10),(2,20);",
+            "CREATE TABLE x(b INTEGER);",
+            "INSERT INTO x VALUES (20),(30);",
+            "SELECT * FROM t1 LEFT JOIN l ON t1.a = l.a JOIN x ON l.b = x.b ORDER BY t1.a;",
+            # joins combined with group by / distinct / limit
+            "CREATE TABLE g1(a INTEGER, k INTEGER);",
+            "CREATE TABLE g2(a INTEGER, v TEXT);",
+            "INSERT INTO g1 VALUES (1,1),(2,1),(3,2);",
+            "INSERT INTO g2 VALUES (1,'x'),(2,'y');",
+            "SELECT g2.v, COUNT(*) FROM g1 JOIN g2 ON g1.a = g2.a GROUP BY g2.v ORDER BY g2.v;",
+            "SELECT DISTINCT t1.a FROM t1 JOIN t2 ON t1.a = t2.a ORDER BY t1.a;",
+            "SELECT t1.a, t2.c FROM t1 LEFT JOIN t2 ON t1.a = t2.a ORDER BY t1.a LIMIT 2;",
+        ])
+
+    def test_join_qualified_star_battery(self):
+        self.assert_parity([
+            "CREATE TABLE t1(a INTEGER, b INTEGER);",
+            "CREATE TABLE t2(a INTEGER);",
+            "INSERT INTO t1 VALUES (1,2);",
+            "INSERT INTO t2 VALUES (1);",
+            "SELECT t1.* FROM t1 JOIN t2 ON t1.a = t2.a;",
+            "SELECT t2.*, t1.* FROM t1 JOIN t2 ON t1.a = t2.a;",
+            # qualified references work in single-table queries too
+            "SELECT t1.a FROM t1;",
+        ])
+
+    def test_join_errors_agree(self):
+        self.assert_parity([
+            "CREATE TABLE t1(a INTEGER);",
+            "CREATE TABLE t2(a INTEGER, b INTEGER);",
+            "INSERT INTO t1 VALUES (1);",
+            "INSERT INTO t2 VALUES (1,2);",
+            "SELECT a FROM t1 JOIN t2 ON t1.a = t2.a;",
+            "SELECT t1.nope FROM t1 JOIN t2 ON t1.a = t2.b;",
+            "SELECT * FROM t1 JOIN t2 ON t1.a = t2.nope;",
+            "SELECT * FROM t1 JOIN nope ON t1.a = nope.b;",
+            "CREATE TABLE t3(c INTEGER);",
+            "SELECT * FROM t1 JOIN t2 ON t1.a = t3.c;",
+            "SELECT * FROM t1 JOIN t2 USING (b);",
+            "CREATE TABLE u(a INTEGER);",
+            "INSERT INTO u VALUES (1);",
+            "SELECT * FROM t1 JOIN u USING (b);",
+            "SELECT nope.* FROM t1 JOIN t2 ON 1;",
+            "SELECT * FROM t1 JOIN t1 ON t1.a = t1.a;",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,506 @@
+# Multi-table JOINs - a1-a4 acceptance data.
+# Golden values generated from the real sqlite3; ORDER BY makes output
+# deterministic. NULL never matches in join conditions; LEFT JOIN
+# pads unmatched rows with NULL; USING merges its columns.
+
+statement ok
+CREATE TABLE t1(a INTEGER, b TEXT);
+
+statement ok
+CREATE TABLE t2(a INTEGER, c TEXT);
+
+statement ok
+INSERT INTO t1 VALUES (1,'x'),(2,'y'),(3,'z');
+
+statement ok
+INSERT INTO t2 VALUES (2,'p'),(3,'q'),(4,'r');
+
+query II
+SELECT t1.a, t2.a FROM t1 JOIN t2 ON t1.a = t2.a ORDER BY t1.a;
+----
+2
+2
+3
+3
+
+query IITI
+SELECT * FROM t1 JOIN t2 ON t1.a = t2.a ORDER BY t1.a;
+----
+2
+y
+2
+p
+3
+z
+3
+q
+
+query IT
+SELECT t1.b, t2.c FROM t1 INNER JOIN t2 ON t1.a = t2.a ORDER BY t1.a;
+----
+y
+p
+z
+q
+
+statement ok
+CREATE TABLE n(a INTEGER);
+
+statement ok
+INSERT INTO n VALUES (1),(NULL),(2);
+
+query II
+SELECT * FROM t1 JOIN n ON t1.a = n.a ORDER BY t1.a;
+----
+1
+x
+1
+2
+y
+2
+
+statement ok
+CREATE TABLE r(x INTEGER, y INTEGER);
+
+statement ok
+INSERT INTO r VALUES (0,25),(2,15),(5,5);
+
+statement ok
+CREATE TABLE x(b INTEGER);
+
+statement ok
+INSERT INTO x VALUES (20),(30);
+
+query III
+SELECT t1.a, r.x, r.y FROM t1 JOIN r ON t1.a >= r.x AND t1.a <= r.y ORDER BY t1.a, r.x;
+----
+1
+0
+25
+2
+0
+25
+2
+2
+15
+3
+0
+25
+3
+2
+15
+
+query ITI
+SELECT t1.b, r.x, r.y FROM t1 JOIN r ON t1.a < r.x AND t1.b > 'w' ORDER BY t1.a, r.x;
+----
+x
+2
+15
+x
+5
+5
+y
+5
+5
+z
+5
+5
+
+statement ok
+CREATE TABLE m(a INTEGER);
+
+statement ok
+INSERT INTO m VALUES (9);
+
+query I
+SELECT COUNT(*) FROM t1 JOIN m ON t1.a = m.a;
+----
+0
+
+query IIIT
+SELECT * FROM t1 LEFT JOIN t2 ON t1.a = t2.a ORDER BY t1.a;
+----
+1
+x
+NULL
+NULL
+2
+y
+2
+p
+3
+z
+3
+q
+
+query IT
+SELECT t1.a, t2.c FROM t1 LEFT OUTER JOIN t2 ON t1.a = t2.a ORDER BY t1.a;
+----
+1
+NULL
+2
+p
+3
+q
+
+query I
+SELECT t1.a FROM t1 LEFT JOIN t2 ON t1.a = t2.a WHERE t2.a IS NULL ORDER BY t1.a;
+----
+1
+
+query IIT
+SELECT * FROM t1 LEFT JOIN n ON t1.a = n.a ORDER BY t1.a;
+----
+1
+x
+1
+2
+y
+2
+3
+z
+NULL
+
+query IIT
+SELECT * FROM t1 LEFT JOIN t2 ON 0 ORDER BY t1.a;
+----
+1
+x
+NULL
+NULL
+2
+y
+NULL
+NULL
+3
+z
+NULL
+NULL
+
+statement ok
+CREATE TABLE e(a INTEGER);
+
+query II
+SELECT t1.a, e.a FROM t1 LEFT JOIN e ON t1.a = e.a ORDER BY t1.a;
+----
+1
+NULL
+2
+NULL
+3
+NULL
+
+query I
+SELECT COUNT(*) FROM t1 LEFT JOIN e;
+----
+3
+
+statement ok
+CREATE TABLE c1(a INTEGER);
+
+statement ok
+CREATE TABLE c2(b INTEGER);
+
+statement ok
+INSERT INTO c1 VALUES (1),(2);
+
+statement ok
+INSERT INTO c2 VALUES (10),(20);
+
+query II
+SELECT * FROM c1 CROSS JOIN c2 ORDER BY c1.a, c2.b;
+----
+1
+10
+1
+20
+2
+10
+2
+20
+
+query II
+SELECT * FROM c1, c2 ORDER BY c1.a, c2.b;
+----
+1
+10
+1
+20
+2
+10
+2
+20
+
+query I
+SELECT COUNT(*) FROM c1, c2;
+----
+4
+
+query II
+SELECT c1.a, c2.b FROM c1, c2 WHERE c1.a = c2.b/10 ORDER BY c1.a;
+----
+1
+10
+2
+20
+
+query II
+SELECT * FROM c1 JOIN c2 ORDER BY c1.a, c2.b;
+----
+1
+10
+1
+20
+2
+10
+2
+20
+
+statement ok
+CREATE TABLE t3(c INTEGER);
+
+statement ok
+INSERT INTO t3 VALUES (100),(200);
+
+query I
+SELECT COUNT(*) FROM c1, c2 CROSS JOIN t3;
+----
+8
+
+query ITI
+SELECT * FROM t1 JOIN t2 USING (a) ORDER BY a;
+----
+2
+y
+p
+3
+z
+q
+
+query ITI
+SELECT a, b, c FROM t1 JOIN t2 USING (a) ORDER BY a;
+----
+2
+y
+p
+3
+z
+q
+
+query II
+SELECT t1.a, t2.a FROM t1 JOIN t2 USING (a) ORDER BY t1.a;
+----
+2
+2
+3
+3
+
+query ITI
+SELECT a, b, c FROM t1 LEFT JOIN t2 USING (a) ORDER BY a;
+----
+1
+x
+NULL
+2
+y
+p
+3
+z
+q
+
+query ITI
+SELECT * FROM t1 JOIN t2 USING (a) WHERE a > 1 ORDER BY a;
+----
+2
+y
+p
+3
+z
+q
+
+query I
+SELECT b FROM t1 JOIN t2 USING (a) WHERE a = 2;
+----
+y
+
+statement ok
+CREATE TABLE u1(p INTEGER, a INTEGER, q INTEGER);
+
+statement ok
+CREATE TABLE u2(r INTEGER, a INTEGER, s INTEGER);
+
+statement ok
+INSERT INTO u1 VALUES (1,5,2);
+
+statement ok
+INSERT INTO u2 VALUES (3,5,4);
+
+query IIII
+SELECT * FROM u1 JOIN u2 USING (a);
+----
+1
+5
+2
+3
+4
+
+statement ok
+CREATE TABLE v1(k INTEGER, x INTEGER);
+
+statement ok
+CREATE TABLE v2(k INTEGER, x INTEGER);
+
+statement ok
+INSERT INTO v1 VALUES (1,10);
+
+statement ok
+INSERT INTO v2 VALUES (1,20);
+
+query III
+SELECT * FROM v1 JOIN v2 USING (k);
+----
+1
+10
+20
+
+query II
+SELECT v1.x, v2.x FROM v1 JOIN v2 USING (k);
+----
+10
+20
+
+statement ok
+CREATE TABLE l(a INTEGER, b INTEGER);
+
+statement ok
+INSERT INTO l VALUES (1,10),(2,20);
+
+statement ok
+CREATE TABLE w(b INTEGER, c INTEGER);
+
+statement ok
+INSERT INTO w VALUES (10,100),(20,200);
+
+query IIIII
+SELECT * FROM t1 JOIN l ON t1.a = l.a JOIN w ON l.b = w.b ORDER BY t1.a;
+----
+1
+x
+1
+10
+10
+100
+2
+y
+2
+20
+20
+200
+
+statement ok
+CREATE TABLE s1(k INTEGER, a INTEGER);
+
+statement ok
+CREATE TABLE s2(k INTEGER, b INTEGER);
+
+statement ok
+CREATE TABLE s3(k INTEGER, c INTEGER);
+
+statement ok
+INSERT INTO s1 VALUES (1,10);
+
+statement ok
+INSERT INTO s2 VALUES (1,20);
+
+statement ok
+INSERT INTO s3 VALUES (1,30);
+
+query IIII
+SELECT * FROM s1 JOIN s2 USING (k) JOIN s3 USING (k);
+----
+1
+10
+20
+30
+
+query I
+SELECT k FROM s1 JOIN s2 USING (k) JOIN s3 USING (k);
+----
+1
+
+query IIII
+SELECT * FROM t1 LEFT JOIN l ON t1.a = l.a JOIN x ON l.b = x.b ORDER BY t1.a;
+----
+2
+y
+2
+20
+20
+
+query II
+SELECT * FROM c1, c2 JOIN t3 ON c2.b = t3.c;
+----
+
+statement ok
+CREATE TABLE g1(a INTEGER, k INTEGER);
+
+statement ok
+CREATE TABLE g2(a INTEGER, v TEXT);
+
+statement ok
+INSERT INTO g1 VALUES (1,1),(2,1),(3,2);
+
+statement ok
+INSERT INTO g2 VALUES (1,'x'),(2,'y');
+
+query TI
+SELECT g2.v, COUNT(*) FROM g1 JOIN g2 ON g1.a = g2.a GROUP BY g2.v ORDER BY g2.v;
+----
+x
+1
+y
+1
+
+query I
+SELECT DISTINCT t1.a FROM t1 JOIN t2 ON t1.a = t2.a ORDER BY t1.a;
+----
+2
+3
+
+query IT
+SELECT t1.a, t2.c FROM t1 LEFT JOIN t2 ON t1.a = t2.a ORDER BY t1.a LIMIT 2;
+----
+1
+NULL
+2
+p
+
+query IIT
+SELECT t1.a, COUNT(t2.c) FROM t1 LEFT JOIN t2 ON t1.a = t2.a GROUP BY t1.a ORDER BY t1.a;
+----
+1
+0
+2
+1
+3
+1
+
+query II
+SELECT t1.* FROM t1 JOIN t2 ON t1.a = t2.a;
+----
+2
+y
+3
+z
+
+query III
+SELECT t2.*, t1.* FROM t1 JOIN t2 ON t1.a = t2.a;
+----
+2
+p
+2
+y
+3
+q
+3
+z
