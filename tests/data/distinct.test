@@ -1,0 +1,69 @@
+# DISTINCT — a2 acceptance data (select5.test style).
+# Whole-row dedup; multiple NULL rows collapse to one; text is byte-wise.
+
+statement ok
+CREATE TABLE d(x INTEGER, y TEXT);
+
+statement ok
+INSERT INTO d VALUES (1, 'a'), (1, 'a'), (2, 'b'), (NULL, 'n'), (NULL, 'n'), (1, 'A');
+
+query I
+SELECT DISTINCT x FROM d;
+----
+1
+2
+NULL
+
+query IT
+SELECT DISTINCT x, y FROM d;
+----
+1
+a
+2
+b
+NULL
+n
+1
+A
+
+query T
+SELECT DISTINCT y FROM d;
+----
+a
+b
+n
+A
+
+# DISTINCT followed by ORDER BY
+query I
+SELECT DISTINCT x FROM d ORDER BY x;
+----
+NULL
+1
+2
+
+query IT
+SELECT DISTINCT x, y FROM d ORDER BY y;
+----
+1
+A
+1
+a
+2
+b
+NULL
+n
+
+# no-affinity column: 5 and 5.0 collapse, '5' stays distinct
+statement ok
+CREATE TABLE e(x);
+
+statement ok
+INSERT INTO e VALUES (5), ('5'), (5.0), ('abc');
+
+query T
+SELECT DISTINCT x FROM e;
+----
+5
+5
+abc

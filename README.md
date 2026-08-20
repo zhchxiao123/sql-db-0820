@@ -19,6 +19,12 @@ sqllogictest corpus. Work in progress.
   without `WHERE`), `SELECT` with `FROM` and `WHERE` (equality, ranges,
   `AND`/`OR`, `IS NULL`, `LIKE` / `NOT LIKE` / `ESCAPE`, column references
   in expressions, `*`).
+* **Ordering, dedup, slicing** — `ORDER BY` (multi-column lexicographic,
+  per-column `ASC`/`DESC`, NULL smallest like sqlite, expressions and
+  1-based output ordinals), `SELECT DISTINCT` (whole-row dedup; NULLs
+  collapse, numbers compare numerically), `LIMIT n` / `LIMIT n OFFSET m`
+  / `LIMIT o, c` (negative LIMIT = no limit, negative OFFSET = 0,
+  sort-then-slice).
 
 The runner CLI is the project's test seam — every later slice is accepted
 through it.
@@ -80,6 +86,13 @@ Declared column types map to affinities (`INT` -> INTEGER, `CHAR/CLOB/TEXT`
   `NULL`.
 * **LIKE** is ASCII case-insensitive by default; `%` matches any sequence,
   `_` matches one character, `ESCAPE` overrides the escape character.
+* **ORDER BY / DISTINCT / LIMIT** follow sqlite: ORDER BY orders NULL
+  smallest (ASC first / DESC last), then numbers, then text (byte-wise);
+  integer ORDER BY terms are 1-based output ordinals (out-of-range is an
+  error); DISTINCT collapses NULLs and compares numbers numerically
+  (`5 == 5.0`, but `5 != '5'` without affinity); LIMIT/OFFSET evaluate to
+  integers (NULL/float is a "datatype mismatch" error), negative LIMIT
+  means no limit, negative OFFSET means 0, and ORDER BY runs before LIMIT.
 * **Storage is in-memory** per engine instance; the runner gives each test
   file a fresh engine (like a fresh sqlite connection per file). Durability
   is out of scope for this slice.

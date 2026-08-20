@@ -188,6 +188,82 @@ class SqliteParityTest(unittest.TestCase):
             "SELECT x+0 FROM r;",
         ])
 
+    # -- slice 2: ORDER BY / DISTINCT / LIMIT ----------------------------------
+
+    def test_order_by_battery(self):
+        self.assert_parity([
+            "CREATE TABLE t(a INTEGER, b TEXT);",
+            "INSERT INTO t VALUES (3, 'c'), (1, 'a'), (NULL, 'n'), (2, 'b'), (3, 'C'), (1, 'A');",
+            "SELECT a FROM t ORDER BY a;",
+            "SELECT a FROM t ORDER BY a DESC;",
+            "SELECT a, b FROM t ORDER BY a, b;",
+            "SELECT a, b FROM t ORDER BY a DESC, b ASC;",
+            "SELECT b FROM t ORDER BY b;",
+            "SELECT b FROM t ORDER BY b DESC;",
+            "SELECT a, b FROM t ORDER BY a+1;",
+            "SELECT a, b FROM t ORDER BY 1;",
+            "SELECT a, b FROM t ORDER BY 2 DESC;",
+            "SELECT a FROM t ORDER BY -a;",
+            "SELECT a FROM t WHERE a IS NOT NULL ORDER BY a DESC;",
+        ])
+
+    def test_order_by_errors(self):
+        self.assert_parity([
+            "CREATE TABLE t(a INTEGER);",
+            "INSERT INTO t VALUES (1), (2);",
+            "SELECT a FROM t ORDER BY z;",
+            "SELECT a FROM t ORDER BY 3;",
+        ])
+
+    def test_distinct_battery(self):
+        self.assert_parity([
+            "CREATE TABLE d(x INTEGER, y TEXT);",
+            "INSERT INTO d VALUES (1, 'a'), (1, 'a'), (2, 'b'), (NULL, 'n'), (NULL, 'n'), (1, 'A');",
+            "SELECT DISTINCT x FROM d;",
+            "SELECT DISTINCT x, y FROM d;",
+            "SELECT DISTINCT y FROM d;",
+            "SELECT DISTINCT x FROM d ORDER BY x;",
+            "SELECT DISTINCT x, y FROM d ORDER BY y;",
+            "SELECT DISTINCT 5, 5.0;",
+            "SELECT DISTINCT 5, '5';",
+        ])
+
+    def test_distinct_no_affinity_cross_type(self):
+        self.assert_parity([
+            "CREATE TABLE e(x);",
+            "INSERT INTO e VALUES (5), ('5'), (5.0), ('abc');",
+            "SELECT DISTINCT x FROM e;",
+        ])
+
+    def test_limit_battery(self):
+        self.assert_parity([
+            "CREATE TABLE n(v INTEGER);",
+            "INSERT INTO n VALUES (1), (2), (3), (4), (5);",
+            "SELECT v FROM n LIMIT 2;",
+            "SELECT v FROM n LIMIT 0;",
+            "SELECT v FROM n LIMIT -1;",
+            "SELECT v FROM n LIMIT 2 OFFSET 2;",
+            "SELECT v FROM n LIMIT 2 OFFSET 10;",
+            "SELECT v FROM n LIMIT 2 OFFSET -1;",
+            "SELECT v FROM n LIMIT 2, 1;",
+            "SELECT v FROM n ORDER BY v DESC LIMIT 2;",
+            "SELECT v FROM n LIMIT 1+1;",
+            "SELECT v FROM n LIMIT -1 OFFSET 3;",
+            "SELECT v FROM n LIMIT 3 OFFSET -5;",
+            "SELECT v FROM n LIMIT '2';",
+            "SELECT DISTINCT v FROM n ORDER BY v DESC LIMIT 2;",
+        ])
+
+    def test_limit_errors(self):
+        self.assert_parity([
+            "CREATE TABLE n(v INTEGER);",
+            "INSERT INTO n VALUES (1), (2);",
+            "SELECT v FROM n LIMIT NULL;",
+            "SELECT v FROM n LIMIT 1.5;",
+            "SELECT v FROM n LIMIT x;",
+            "SELECT v FROM n LIMIT 1 OFFSET NULL;",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

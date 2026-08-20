@@ -1,0 +1,76 @@
+# LIMIT / OFFSET — a3 acceptance data.
+# LIMIT n / LIMIT n OFFSET m / comma form; negative LIMIT = no limit;
+# LIMIT 0 = empty; OFFSET beyond end = empty; ORDER BY applies before LIMIT.
+
+statement ok
+CREATE TABLE n(v INTEGER);
+
+statement ok
+INSERT INTO n VALUES (1), (2), (3), (4), (5);
+
+query I
+SELECT v FROM n LIMIT 2;
+----
+1
+2
+
+query I
+SELECT v FROM n LIMIT 0;
+----
+
+query I
+SELECT v FROM n LIMIT -1;
+----
+1
+2
+3
+4
+5
+
+query I
+SELECT v FROM n LIMIT 2 OFFSET 2;
+----
+3
+4
+
+query I
+SELECT v FROM n LIMIT 2 OFFSET 10;
+----
+
+query I
+SELECT v FROM n ORDER BY v DESC LIMIT 2;
+----
+5
+4
+
+# comma form: LIMIT <offset>, <count>
+query I
+SELECT v FROM n LIMIT 2, 1;
+----
+3
+
+query I
+SELECT v FROM n LIMIT 1+1;
+----
+1
+2
+
+query I
+SELECT v FROM n LIMIT -1 OFFSET 3;
+----
+4
+5
+
+query I
+SELECT v FROM n LIMIT 3 OFFSET -5;
+----
+1
+2
+3
+
+# LIMIT with DISTINCT and ORDER BY combined
+query I
+SELECT DISTINCT v FROM n ORDER BY v DESC LIMIT 2;
+----
+5
+4

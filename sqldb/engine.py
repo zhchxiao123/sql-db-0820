@@ -178,6 +178,7 @@ KEYWORDS = {
     "TRUE", "FALSE", "SELECT",
     "CREATE", "TABLE", "INSERT", "INTO", "VALUES", "DELETE",
     "FROM", "WHERE", "LIKE", "ESCAPE",
+    "DISTINCT", "ORDER", "BY", "ASC", "DESC", "LIMIT", "OFFSET",
 }
 
 _NUM_RE = re.compile(r"(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?")
@@ -390,6 +391,10 @@ class Parser:
 
     def parse_select_stmt(self) -> Tuple:
         self._expect_kw("SELECT")
+        distinct = False
+        if self.peek().kind == "kw" and self.peek().value == "DISTINCT":
+            self._next()
+            distinct = True
         # column references are only legal when a FROM clause is present; the
         # select list is parsed before FROM, so scan ahead to find it.
         self.allow_columns = self._has_from()
@@ -413,8 +418,39 @@ class Parser:
             if self.peek().kind == "kw" and self.peek().value == "WHERE":
                 self._next()
                 where = self.parse_expr()
+        order_by: Optional[List[Tuple[Tuple, bool]]] = None
+        if self.peek().kind == "kw" and self.peek().value == "ORDER":
+            self._next()
+            self._expect_kw("BY")
+            order_by = []
+            while True:
+                term = self.parse_expr()
+                asc = True
+                if self.peek().kind == "kw" and self.peek().value == "ASC":
+                    self._next()
+                elif self.peek().kind == "kw" and self.peek().value == "DESC":
+                    self._next()
+                    asc = False
+                order_by.append((term, asc))
+                if self.peek().kind == "op" and self.peek().value == ",":
+                    self._next()
+                    continue
+                break
+        limit: Optional[Tuple[Optional[Tuple], Optional[Tuple]]] = None
+        if self.peek().kind == "kw" and self.peek().value == "LIMIT":
+            self._next()
+            e1 = self.parse_expr()
+            if self.peek().kind == "op" and self.peek().value == ",":
+                # comma form: LIMIT <offset>, <count>
+                self._next()
+                limit = (self.parse_expr(), e1)
+            elif self.peek().kind == "kw" and self.peek().value == "OFFSET":
+                self._next()
+                limit = (e1, self.parse_expr())
+            else:
+                limit = (e1, None)
         self._finish()
-        return ("select", items, table_name, where)
+        return ("select", distinct, items, table_name, where, order_by, limit)
 
     def parse_create_stmt(self) -> Tuple:
         self._expect_kw("CREATE")
@@ -894,6 +930,67 @@ def _walk_expr_cols(node: Any):
             yield from _walk_expr_cols(item)
 
 
+def _output_width(items: List[Tuple], table: Optional[Table]) -> int:
+    """Number of output columns of a select list (for ORDER BY ordinals)."""
+    width = 0
+    for item in items:
+        if item[0] == "star":
+            width += len(table.columns)
+        else:
+            width += 1
+    return width
+
+
+def _ordinal_suffix(i: int) -> str:
+    if 10 <= i % 100 <= 20:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(i % 10, "th")
+
+
+def _order_sort_key(term: Tuple, p: Tuple[List[Any], Optional[RowContext]]) -> Tuple:
+    """Sort key for one ORDER BY term: (class, value) with sqlite ordering
+    (class 0 = NULL smallest, 1 = numbers, 2 = text)."""
+    out, ctx = p
+    if term[0] == "num" and isinstance(term[1], int):
+        v = out[term[1] - 1]
+    else:
+        v = eval_expr(term, ctx)
+    if v is None:
+        return (0, None)
+    if is_number(v):
+        return (1, v)
+    return (2, v)
+
+
+def _limit_int(v: Any) -> int:
+    """sqlite LIMIT/OFFSET value: integer or integer-looking text, else error."""
+    if isinstance(v, int) and not isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        n = _text_to_number(v)
+        if n is not None and isinstance(n, int):
+            return n
+    raise EngineError("datatype mismatch")
+
+
+def _apply_limit(proj: List[Tuple[List[Any], Optional[RowContext]]],
+                 limit: Tuple[Optional[Tuple], Optional[Tuple]]) -> List[Tuple[List[Any], Optional[RowContext]]]:
+    limit_node, offset_node = limit
+    n: Optional[int] = None
+    if limit_node is not None:
+        n = _limit_int(eval_expr(limit_node, None))
+    m = 0
+    if offset_node is not None:
+        m = _limit_int(eval_expr(offset_node, None))
+    if n is not None and n < 0:
+        n = None  # negative LIMIT = no limit
+    if m < 0:
+        m = 0  # negative OFFSET = 0
+    if n is None:
+        return proj[m:]
+    return proj[m:m + n]
+
+
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
@@ -1009,38 +1106,76 @@ class Engine:
         return StatementResult(rowcount=deleted)
 
     def _run_select(self, stmt: Tuple) -> StatementResult:
-        _, items, table_name, where = stmt
+        _, distinct, items, table_name, where, order_by, limit = stmt
         if table_name is None:
             # expression-only SELECT (no FROM): a single row
             if any(it[0] == "star" for it in items):
                 raise EngineError("SELECT * requires a FROM clause")
             values = [eval_expr(e, None) for e in items]
-            return StatementResult(rows=[values], rowcount=1)
-        table = self.tables.get(table_name)
-        if table is None:
-            raise EngineError(f"no such table: {table_name}")
-        # validate column references up front (sqlite resolves columns at
-        # prepare time, so an empty table must still reject bad columns)
-        known = {c.name for c in table.columns}
-        for item in items:
-            if item[0] != "star":
-                for col in _walk_expr_cols(item):
+            proj: List[Tuple[List[Any], Optional[RowContext]]] = [(values, None)]
+        else:
+            table = self.tables.get(table_name)
+            if table is None:
+                raise EngineError(f"no such table: {table_name}")
+            # validate column references up front (sqlite resolves columns at
+            # prepare time, so an empty table must still reject bad columns)
+            known = {c.name for c in table.columns}
+
+            def check_expr(e: Tuple) -> None:
+                for col in _walk_expr_cols(e):
                     if col not in known:
                         raise EngineError(f"no such column: {col}")
-        if where is not None:
-            for col in _walk_expr_cols(where):
-                if col not in known:
-                    raise EngineError(f"no such column: {col}")
-        out_rows: List[List[Any]] = []
-        for row in table.rows:
-            ctx = RowContext(table, row)
-            if where is not None and not _truthy(eval_expr(where, ctx)):
-                continue
-            projected: List[Any] = []
+
             for item in items:
-                if item[0] == "star":
-                    projected.extend(row)
-                else:
-                    projected.append(eval_expr(item, ctx))
-            out_rows.append(projected)
-        return StatementResult(rows=out_rows, rowcount=len(out_rows))
+                if item[0] != "star":
+                    check_expr(item)
+            if where is not None:
+                check_expr(where)
+            if order_by is not None:
+                for term, _asc in order_by:
+                    check_expr(term)
+            proj = []
+            for row in table.rows:
+                ctx = RowContext(table, row)
+                if where is not None and not _truthy(eval_expr(where, ctx)):
+                    continue
+                out: List[Any] = []
+                for item in items:
+                    if item[0] == "star":
+                        out.extend(row)
+                    else:
+                        out.append(eval_expr(item, ctx))
+                proj.append((out, ctx))
+        # DISTINCT: whole-row dedup; NULLs are equal, numbers compare
+        # numerically (5 == 5.0), text is byte-wise (5 != '5').
+        if distinct:
+            seen = set()
+            dedup = []
+            for out, ctx in proj:
+                key = tuple(out)
+                if key in seen:
+                    continue
+                seen.add(key)
+                dedup.append((out, ctx))
+            proj = dedup
+        # ORDER BY: sqlite ordering (NULL smallest, then numbers, then text).
+        # Integer literals are 1-based ordinals of the output row. A stable
+        # multi-pass sort (rightmost term first) gives per-column ASC/DESC.
+        if order_by:
+            width = _output_width(items, table if table_name is not None else None)
+            for i, (term, _asc) in enumerate(order_by, start=1):
+                if term[0] == "num" and isinstance(term[1], int):
+                    idx = term[1]
+                    if idx < 1 or idx > width:
+                        raise EngineError(
+                            f"{i}{_ordinal_suffix(i)} ORDER BY term out of range - "
+                            f"should be between 1 and {width}"
+                        )
+            for term, asc in reversed(order_by):
+                proj = sorted(
+                    proj, key=lambda p, t=term: _order_sort_key(t, p), reverse=not asc
+                )
+        # LIMIT / OFFSET: applied after sorting.
+        if limit is not None:
+            proj = _apply_limit(proj, limit)
+        return StatementResult(rows=[out for out, _ctx in proj], rowcount=len(proj))
