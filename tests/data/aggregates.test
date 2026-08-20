@@ -1,0 +1,121 @@
+# Whole-table aggregation — a1 acceptance data (aggregates.test style).
+# SUM/AVG/MIN/MAX on empty/all-NULL groups yield NULL; COUNT yields 0;
+# TOTAL always returns a number; text converts (non-numeric counts as 0).
+
+statement ok
+CREATE TABLE t(x INTEGER);
+
+statement ok
+INSERT INTO t VALUES (1), (2), (3);
+
+query IIRIIR
+SELECT COUNT(*), SUM(x), AVG(x), MIN(x), MAX(x), TOTAL(x) FROM t;
+----
+3
+6
+2.0
+1
+3
+6.0
+
+# aggregate expressions
+query I
+SELECT COUNT(*)+1 FROM t;
+----
+4
+
+query I
+SELECT 2*COUNT(*) FROM t;
+----
+6
+
+query I
+SELECT SUM(x)/COUNT(x) FROM t;
+----
+2
+
+# empty table: COUNT 0, SUM/AVG/MIN/MAX NULL, TOTAL 0.0
+statement ok
+CREATE TABLE e(x INTEGER);
+
+query I
+SELECT COUNT(*) FROM e;
+----
+0
+
+query I
+SELECT COUNT(x) FROM e;
+----
+0
+
+query I
+SELECT SUM(x) FROM e;
+----
+NULL
+
+query I
+SELECT AVG(x) FROM e;
+----
+NULL
+
+query I
+SELECT MIN(x) FROM e;
+----
+NULL
+
+query I
+SELECT MAX(x) FROM e;
+----
+NULL
+
+query R
+SELECT TOTAL(x) FROM e;
+----
+0.0
+
+# all-NULL column: COUNT(*) counts rows, COUNT(x) counts non-NULL
+statement ok
+INSERT INTO e VALUES (NULL), (NULL);
+
+query I
+SELECT COUNT(*) FROM e;
+----
+2
+
+query I
+SELECT COUNT(x) FROM e;
+----
+0
+
+query I
+SELECT SUM(x) FROM e;
+----
+NULL
+
+query R
+SELECT TOTAL(x) FROM e;
+----
+0.0
+
+# text values in aggregates: '1' -> 1, 'abc' -> 0, 2 -> 2, '1.5' -> 1.5
+statement ok
+CREATE TABLE s(x);
+
+statement ok
+INSERT INTO s VALUES ('1'), ('abc'), (2), ('1.5');
+
+query RIRIIR
+SELECT SUM(x), AVG(x), COUNT(x), MIN(x), MAX(x), TOTAL(x) FROM s;
+----
+4.5
+1.125
+4
+2
+abc
+4.5
+
+# aggregates without FROM
+query I
+SELECT COUNT(*);
+----
+1

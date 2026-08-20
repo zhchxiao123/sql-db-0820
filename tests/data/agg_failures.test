@@ -1,0 +1,49 @@
+# Aggregation failure paths — a5 acceptance data.
+# Invalid references or syntax are judged as failures; the runner keeps going.
+
+statement ok
+CREATE TABLE f(k TEXT, v INTEGER);
+
+statement ok
+INSERT INTO f VALUES ('a', 1), ('b', 2);
+
+statement error
+SELECT COUNT(z) FROM f;
+
+statement error
+SELECT SUM(*) FROM f;
+
+statement error
+SELECT SUM() FROM f;
+
+statement error
+SELECT AVG() FROM f;
+
+statement error
+SELECT v FROM f GROUP BY z;
+
+statement error
+SELECT * FROM f WHERE COUNT(*) > 0;
+
+statement error
+SELECT COUNT(*) FROM f GROUP BY;
+
+# intentional failure: statement ok on invalid aggregate SQL -> judged failed
+statement ok
+SELECT COUNT(nosuch) FROM f;
+
+# valid records after the failures still run
+query TII
+SELECT k, v, COUNT(*) FROM f GROUP BY k ORDER BY k;
+----
+a
+1
+1
+b
+2
+1
+
+query I
+SELECT COUNT(*) FROM f;
+----
+2

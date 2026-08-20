@@ -30,6 +30,13 @@ sqllogictest corpus. Work in progress.
   `ASC`/`DESC`). Correctness-first: indexes are validated and recorded but
   do not change query results (lookup stays a full scan until the
   performance slice); duplicate creation errors per sqlite.
+* **Aggregation** — `COUNT` / `SUM` / `AVG` / `MIN` / `MAX` / `TOTAL`
+  (incl. `COUNT(*)`, `COUNT()`, `COUNT(DISTINCT x)`), `GROUP BY`
+  (multi-column, NULL keys group together), `HAVING` (aggregates and group
+  keys; whole table is one group without GROUP BY). sqlite semantics: SUM/
+  AVG of an empty/all-NULL group is NULL, COUNT is 0, TOTAL always returns
+  a number, MIN/MAX ignore NULL, text converts to number in SUM/AVG/TOTAL
+  (non-numeric text counts as 0).
 
 The runner CLI is the project's test seam — every later slice is accepted
 through it.

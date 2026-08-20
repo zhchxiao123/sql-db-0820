@@ -1,0 +1,142 @@
+# GROUP BY / HAVING — a2/a3 acceptance data (select4.test style).
+# Grouped queries use ORDER BY for deterministic output.
+
+statement ok
+CREATE TABLE g(k TEXT, v INTEGER);
+
+statement ok
+INSERT INTO g VALUES ('a', 1), ('b', 2), ('a', 3), (NULL, 4), (NULL, 5), ('a', NULL);
+
+# a2: grouped aggregates, NULL group key groups together
+query TIIRII
+SELECT k, COUNT(*), SUM(v), AVG(v), MIN(v), MAX(v) FROM g GROUP BY k ORDER BY k;
+----
+NULL
+2
+9
+4.5
+4
+5
+a
+3
+4
+2.0
+1
+3
+b
+1
+2
+2.0
+2
+2
+
+query TI
+SELECT k, COUNT(*) FROM g GROUP BY k ORDER BY k;
+----
+NULL
+2
+a
+3
+b
+1
+
+query T
+SELECT k FROM g GROUP BY k ORDER BY k;
+----
+NULL
+a
+b
+
+# multi-column GROUP BY
+statement ok
+CREATE TABLE m(a INTEGER, b TEXT, v INTEGER);
+
+statement ok
+INSERT INTO m VALUES (1, 'x', 1), (1, 'x', 2), (1, 'y', 3), (2, 'x', 4);
+
+query ITII
+SELECT a, b, COUNT(*), SUM(v) FROM m GROUP BY a, b ORDER BY a, b;
+----
+1
+x
+2
+3
+1
+y
+1
+3
+2
+x
+1
+4
+
+# bare non-grouped column takes the first row of the group (sqlite)
+statement ok
+CREATE TABLE w(a INTEGER, b TEXT);
+
+statement ok
+INSERT INTO w VALUES (1, 'first'), (1, 'second'), (2, 'only');
+
+query ITI
+SELECT a, b, COUNT(*) FROM w GROUP BY a ORDER BY a;
+----
+1
+first
+2
+2
+only
+1
+
+# empty table with GROUP BY yields no rows
+statement ok
+CREATE TABLE e2(x INTEGER);
+
+query II
+SELECT x, COUNT(*) FROM e2 GROUP BY x;
+----
+
+# a3: HAVING filters groups (aggregates and group keys)
+query TI
+SELECT k, COUNT(*) FROM g GROUP BY k HAVING COUNT(*) >= 2 ORDER BY k;
+----
+NULL
+2
+a
+3
+
+query TI
+SELECT k, SUM(v) FROM g GROUP BY k HAVING SUM(v) > 5 ORDER BY k;
+----
+NULL
+9
+
+query T
+SELECT k FROM g GROUP BY k HAVING k IS NOT NULL ORDER BY k;
+----
+a
+b
+
+# HAVING without GROUP BY treats the whole table as one group
+query I
+SELECT COUNT(*) FROM g HAVING COUNT(*) > 0;
+----
+6
+
+query TI
+SELECT k, COUNT(*) FROM g GROUP BY k HAVING COUNT(*) > 1 ORDER BY COUNT(*) DESC, k;
+----
+a
+3
+NULL
+2
+
+# DISTINCT aggregates
+query I
+SELECT COUNT(DISTINCT k) FROM g;
+----
+2
+
+query I
+SELECT SUM(DISTINCT v) FROM g;
+----
+15

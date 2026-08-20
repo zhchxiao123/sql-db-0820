@@ -264,6 +264,73 @@ class SqliteParityTest(unittest.TestCase):
             "SELECT v FROM n LIMIT 1 OFFSET NULL;",
         ])
 
+    # -- slice 4: aggregation ----------------------------------------------------
+
+    def test_aggregate_battery(self):
+        self.assert_parity([
+            "CREATE TABLE e(x INTEGER);",
+            "SELECT COUNT(*) FROM e;",
+            "SELECT COUNT(x) FROM e;",
+            "SELECT SUM(x) FROM e;",
+            "SELECT TOTAL(x) FROM e;",
+            "SELECT AVG(x) FROM e;",
+            "SELECT MIN(x) FROM e;",
+            "SELECT MAX(x) FROM e;",
+            "INSERT INTO e VALUES (NULL), (NULL);",
+            "SELECT COUNT(*) FROM e;",
+            "SELECT COUNT(x) FROM e;",
+            "SELECT SUM(x) FROM e;",
+            "SELECT TOTAL(x) FROM e;",
+            "SELECT AVG(x) FROM e;",
+            "SELECT MIN(x) FROM e;",
+            "SELECT MAX(x) FROM e;",
+            "CREATE TABLE s(x);",
+            "INSERT INTO s VALUES ('1'), ('abc'), (2), ('1.5');",
+            "SELECT SUM(x), TOTAL(x), AVG(x), MIN(x), MAX(x), COUNT(x) FROM s;",
+            "SELECT SUM('abc');",
+            "SELECT SUM('1');",
+            "CREATE TABLE n(x INTEGER);",
+            "INSERT INTO n VALUES (1), (2), (3);",
+            "SELECT SUM(x), AVG(x), SUM(x)*1.0 FROM n;",
+            "SELECT COUNT(*)+1, 2*COUNT(*), SUM(x)/COUNT(x) FROM n;",
+            "SELECT COUNT(*);",
+            "SELECT COUNT()+1;",
+        ])
+
+    def test_group_by_battery(self):
+        self.assert_parity([
+            "CREATE TABLE g(k TEXT, v INTEGER);",
+            "INSERT INTO g VALUES ('a',1),('b',2),('a',3),(NULL,4),(NULL,5),('a',NULL);",
+            "SELECT k, COUNT(*), SUM(v), AVG(v), MIN(v), MAX(v) FROM g GROUP BY k ORDER BY k;",
+            "SELECT k FROM g GROUP BY k ORDER BY k;",
+            "SELECT k, COUNT(*) FROM g GROUP BY k HAVING COUNT(*) >= 2 ORDER BY k;",
+            "SELECT k, SUM(v) FROM g GROUP BY k HAVING SUM(v) > 5 ORDER BY k;",
+            "SELECT k FROM g GROUP BY k HAVING k IS NOT NULL ORDER BY k;",
+            "SELECT COUNT(*) FROM g HAVING COUNT(*) > 0;",
+            "SELECT k, COUNT(*) FROM g GROUP BY k ORDER BY COUNT(*) DESC, k;",
+            "SELECT COUNT(DISTINCT k), SUM(DISTINCT v) FROM g;",
+            "CREATE TABLE m(a INTEGER, b TEXT, v INTEGER);",
+            "INSERT INTO m VALUES (1,'x',1),(1,'x',2),(1,'y',3),(2,'x',4);",
+            "SELECT a, b, COUNT(*), SUM(v) FROM m GROUP BY a, b ORDER BY a, b;",
+            "CREATE TABLE w(a INTEGER, b TEXT);",
+            "INSERT INTO w VALUES (1,'first'),(1,'second'),(2,'only');",
+            "SELECT a, b, COUNT(*) FROM w GROUP BY a ORDER BY a;",
+            "CREATE TABLE e2(x INTEGER);",
+            "SELECT x, COUNT(*) FROM e2 GROUP BY x;",
+        ])
+
+    def test_aggregate_errors_agree(self):
+        self.assert_parity([
+            "CREATE TABLE g(k TEXT, v INTEGER);",
+            "INSERT INTO g VALUES ('a', 1);",
+            "SELECT COUNT(z) FROM g;",
+            "SELECT SUM(*) FROM g;",
+            "SELECT SUM() FROM g;",
+            "SELECT AVG() FROM g;",
+            "SELECT v FROM g GROUP BY z;",
+            "SELECT * FROM g WHERE COUNT(*) > 0;",
+        ])
+
     # -- slice 3: CREATE / DROP INDEX -------------------------------------------
 
     def test_index_parity(self):
