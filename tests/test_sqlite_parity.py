@@ -264,6 +264,44 @@ class SqliteParityTest(unittest.TestCase):
             "SELECT v FROM n LIMIT 1 OFFSET NULL;",
         ])
 
+    # -- slice 3: CREATE / DROP INDEX -------------------------------------------
+
+    def test_index_parity(self):
+        self.assert_parity([
+            "CREATE TABLE t(a INTEGER, b TEXT, c REAL);",
+            "INSERT INTO t VALUES (1, 'x', 1.5), (2, 'y', 2.5), (3, 'z', 3.5);",
+            "CREATE INDEX idx_a ON t(a);",
+            "CREATE INDEX idx_ab ON t(a, b);",
+            "CREATE INDEX idx_a ON t(a);",
+            "CREATE INDEX IF NOT EXISTS idx_a ON t(a);",
+            "CREATE INDEX idx_missing ON nosuch(a);",
+            "CREATE INDEX idx_missing ON t(z);",
+            "CREATE UNIQUE INDEX uidx_a ON t(a);",
+            "SELECT * FROM t WHERE a = 2;",
+            "SELECT * FROM t WHERE a >= 2 AND a < 3;",
+            "SELECT * FROM t WHERE b LIKE 'y%';",
+            "SELECT a, b FROM t ORDER BY a DESC;",
+            "INSERT INTO t VALUES (4, 'w', 4.5);",
+            "DELETE FROM t WHERE a = 4;",
+            "SELECT * FROM t WHERE a IS NOT NULL ORDER BY b;",
+            "DROP INDEX idx_a;",
+            "DROP INDEX idx_a;",
+            "DROP INDEX nosuch;",
+            "DROP INDEX IF EXISTS nosuch;",
+            "CREATE INDEX idx_dirs ON t(a DESC, b);",
+            "SELECT * FROM t ORDER BY a;",
+        ])
+
+    def test_index_errors_agree(self):
+        self.assert_parity([
+            "CREATE TABLE t(a INTEGER);",
+            "CREATE INDEX i ON nosuch(a);",
+            "CREATE INDEX i ON t(z);",
+            "CREATE INDEX i ON t;",
+            "DROP INDEX nosuch;",
+            "CREATE INDEX;",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()
