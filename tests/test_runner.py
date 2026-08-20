@@ -357,5 +357,62 @@ class TestCliExitCode(unittest.TestCase):
         self.assertIn("FAIL", out)
 
 
+class TestBenchmark(unittest.TestCase):
+    """Slice-8 seam: benchmark.py is reproducible (a1) and its failure paths
+    exit non-zero with diagnostics (a4). Timing assertions are deliberately
+    absent: wall-clock is machine-dependent, the benchmark reports the medians
+    and the comparison itself."""
+
+    BENCH = REPO_ROOT / "benchmark.py"
+
+    def run_bench(self, *args):
+        proc = subprocess.run(
+            [sys.executable, str(self.BENCH), *args],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+        )
+        return proc
+
+    def test_reproducible_report_both_sides(self):
+        # two consecutive runs both report engine + sqlite3 medians (a1)
+        outs = []
+        for _ in range(2):
+            proc = self.run_bench("--runs", "1", "--warmup", "0",
+                                  str(DATA / "expressions.test"),
+                                  str(DATA / "select1.test"))
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("engine : median=", proc.stdout)
+            self.assertIn("sqlite3: median=", proc.stdout)
+            self.assertIn("ratio engine/sqlite3", proc.stdout)
+            outs.append(proc.stdout)
+        # both sides of one run must be internally consistent: same corpus
+        # line, same result line
+        self.assertIn("corpus: 2 file(s), engine 93/93/0", outs[0])
+
+    def test_failure_path_missing_file(self):
+        proc = self.run_bench(str(REPO_ROOT / "no-such-file.test"))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("no such file", proc.stderr)
+
+    def test_failure_path_engine_not_green(self):
+        # a failure-path corpus file is not a valid benchmark load: the
+        # engine fails records, so the script refuses to time a broken engine
+        proc = self.run_bench("--runs", "1", "--warmup", "0",
+                              str(DATA / "malformed.test"))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("engine failed", proc.stderr)
+
+    def test_failure_path_strict_slower(self):
+        # with --strict, a slower engine must exit 1 (a2 gate); we cannot
+        # assert which side wins on shared hardware, so just assert the exit
+        # code is 0 or 1 and the RESULT line is printed (never 2/crash).
+        proc = self.run_bench("--strict", "--runs", "1", "--warmup", "0",
+                              str(DATA / "expressions.test"),
+                              str(DATA / "select1.test"))
+        self.assertIn(proc.returncode, (0, 1), proc.stdout + proc.stderr)
+        self.assertIn("RESULT:", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

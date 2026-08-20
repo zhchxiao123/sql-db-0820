@@ -166,3 +166,24 @@ Running the success corpus twice yields identical output (deterministic; the
 engine uses no randomness). `tests/test_runner.py` pins these properties:
 all success records green with zero skips, CLI exit 0, and byte-identical
 output across two runs.
+
+### Benchmark (slice 8)
+
+`benchmark.py` (beside the runner) measures the engine's total wall-clock
+against a sqlite3 baseline on the same corpus:
+
+* both sides reuse the same `parse_sqllogictest` parser and `run_record`
+  validation — only the execution backend differs (sql-db-0820 Engine vs the
+  stdlib `sqlite3` module, SQLite 3.46.1);
+* methodology: one warm-up pass per side, then `--runs` timed passes; the
+  reported figure is the median wall-clock (a1 reproducible);
+* exit codes: 0 = measured (and `--strict` gates engine ≤ sqlite3), 1 =
+  engine slower with `--strict`, 2 = corpus/sqlite3/engine/timing failure.
+
+```
+python benchmark.py --runs 7 --warmup 1
+```
+
+The official sqlite3 CLI is not installed in this sandbox (and the tool
+boundary forbids fetching it), so the baseline is the Python `sqlite3` module
+— the same SQLite library the parity harness uses as ground truth.

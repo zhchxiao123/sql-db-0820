@@ -236,11 +236,13 @@ def _scan_quoted(sql: str, i: int, quote: str) -> Tuple[str, int]:
 
 def tokenize(sql: str) -> List[Token]:
     tokens: List[Token] = []
+    append = tokens.append
     i = 0
     n = len(sql)
+    _KEYWORDS = KEYWORDS
     while i < n:
         c = sql[i]
-        if c.isspace():
+        if c in " \t\n\r\v\f":
             i += 1
             continue
         if c == "-" and i + 1 < n and sql[i + 1] == "-":
@@ -255,37 +257,41 @@ def tokenize(sql: str) -> List[Token]:
             continue
         if c in ("'", '"'):
             text, i = _scan_quoted(sql, i, c)
-            tokens.append(Token("str", text, i))
+            append(Token("str", text, i))
             continue
-        if c.isdigit() or (c == "." and i + 1 < n and sql[i + 1].isdigit()):
+        if ("0" <= c <= "9") or (c == "." and i + 1 < n and "0" <= sql[i + 1] <= "9"):
             m = _NUM_RE.match(sql, i)
             text = m.group(0)
             if any(ch in text for ch in ".eE"):
-                tokens.append(Token("num", float(text), i))
+                append(Token("num", float(text), i))
             else:
-                tokens.append(Token("num", int(text), i))
+                append(Token("num", int(text), i))
             i = m.end()
             continue
-        if c.isalpha() or c == "_":
-            j = i
-            while j < n and (sql[j].isalnum() or sql[j] == "_"):
-                j += 1
+        if ("a" <= c <= "z") or ("A" <= c <= "Z") or c == "_":
+            j = i + 1
+            while j < n:
+                ch = sql[j]
+                if ("a" <= ch <= "z") or ("A" <= ch <= "Z") or ("0" <= ch <= "9") or ch == "_":
+                    j += 1
+                else:
+                    break
             word = sql[i:j]
             up = word.upper()
-            tokens.append(Token("kw", up, i) if up in KEYWORDS else Token("id", word, i))
+            append(Token("kw", up, i) if up in _KEYWORDS else Token("id", word, i))
             i = j
             continue
         two = sql[i:i + 2]
         if two in _OP2:
-            tokens.append(Token("op", two, i))
+            append(Token("op", two, i))
             i += 2
             continue
         if c in _OP1:
-            tokens.append(Token("op", c, i))
+            append(Token("op", c, i))
             i += 1
             continue
         raise EngineError(f"syntax error near {c!r} at position {i}")
-    tokens.append(Token("eof", "", n))
+    append(Token("eof", "", n))
     return tokens
 
 
@@ -304,6 +310,18 @@ class Table:
     name: str
     columns: List[ColumnDef]
     rows: List[List[Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Per-table maps used by RowContext. Built once per table instead of
+        # once per row (the hot path for single-table scans). Qualified
+        # spellings (``t.c``) are included so single-table lookups resolve
+        # uniformly, matching the previous per-row dict construction.
+        self.col_names: List[str] = [c.name for c in self.columns]
+        self._colmap: Dict[str, int] = {c.name: i for i, c in enumerate(self.columns)}
+        self.affinity_map: Dict[str, str] = {c.name: c.affinity for c in self.columns}
+        self.affinity_map.update(
+            {f"{self.name}.{c.name}": c.affinity for c in self.columns}
+        )
 
 
 @dataclass
@@ -327,27 +345,42 @@ class RowContext:
     to the outer scope (sqlite resolution rule).
     """
 
-    __slots__ = ("affinity", "values", "engine", "outer")
+    __slots__ = ("table", "row", "affinity", "values", "qual_values",
+                 "engine", "outer")
 
     def __init__(self, table: Table, row: List[Any], engine: Optional[Any] = None,
                  outer: Optional[Any] = None):
+        self.table = table
+        self.row = row
         self.engine = engine
         self.outer = outer
-        self.affinity = {c.name: c.affinity for c in table.columns}
-        self.values = {c.name: v for c, v in zip(table.columns, row)}
-        # sqlite also accepts the qualified form ``table.col`` in single-table
-        # queries; registering both spellings keeps value/affinity lookup uniform.
-        self.affinity.update({f"{table.name}.{c.name}": c.affinity for c in table.columns})
-        self.values.update({f"{table.name}.{c.name}": v for c, v in zip(table.columns, row)})
+        # affinity (unqualified + qualified) is table-constant and cached on
+        # the Table; values vary per row. The qualified-values dict is built
+        # lazily on first qualified lookup (rare in single-table scans).
+        self.affinity = table.affinity_map
+        self.values = dict(zip(table.col_names, row))
+        self.qual_values: Optional[Dict[str, Any]] = None
+
+    def _qual(self, name: str) -> Optional[Any]:
+        """Value for a qualified ``table.col`` spelling, or None when the
+        qualifier is not this context's table (caller falls through)."""
+        if self.qual_values is None:
+            self.qual_values = {
+                f"{self.table.name}.{c}": v
+                for c, v in zip(self.table.col_names, self.row)
+            }
+        return self.qual_values.get(name)
 
     def value_of(self, name: str) -> Any:
         if name not in self.affinity:
             if self.outer is not None:
                 return self.outer.value_of(name)
             raise EngineError(f"no such column: {name}")
-        # .get: rows always carry every column, but a synthetic empty row
-        # (aggregation over an empty table) yields NULL for existing columns
-        return self.values.get(name)
+        if name in self.values:
+            return self.values[name]
+        # qualified spelling ``t.c`` of this table: affinity contains it (so
+        # we got here) but the row values dict is unqualified; resolve lazily.
+        return self._qual(name)
 
     def affinity_of(self, name: str) -> str:
         if name in self.affinity:
@@ -386,7 +419,7 @@ class JoinContext:
         self.rows = rows
         self.engine = engine
         self.outer = outer
-        self._colmaps = [{c.name: i for i, c in enumerate(t.columns)} for t in tables]
+        self._colmaps = _colmaps_for(tables)
 
     def _resolve(self, name: str) -> Tuple[int, int]:
         if "." in name:
@@ -429,6 +462,16 @@ class JoinContext:
             if str(e).startswith("no such column") and self.outer is not None:
                 return self.outer.has_column(name)
             return False  # ambiguous counts as present; let eval raise it
+
+
+def _colmaps_for(tables: List[Table]) -> List[Dict[str, int]]:
+    """Per-table column-name->index maps, cached by table identity.
+
+    Column layouts are fixed at CREATE time, so the maps can be computed once
+    per table instead of once per joined row (the per-row JoinContext hot
+    path). The cache is attached to the Table object itself.
+    """
+    return [t._colmap for t in tables]  # type: ignore[attr-defined]
 
 
 def _resolve_unqualified(tables: List[Table], colmaps: List[Dict[str, int]],
