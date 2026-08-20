@@ -37,6 +37,18 @@ sqllogictest corpus. Work in progress.
   AVG of an empty/all-NULL group is NULL, COUNT is 0, TOTAL always returns
   a number, MIN/MAX ignore NULL, text converts to number in SUM/AVG/TOTAL
   (non-numeric text counts as 0).
+* **Multi-table joins** — `INNER JOIN` / `LEFT [OUTER] JOIN` / `CROSS JOIN`
+  and comma-separated multi-table `FROM`, with `ON` (any expression, reusing
+  the expression engine) and `USING (col, ...)` conditions; qualified column
+  references (`t.c`) and qualified star (`t.*`). sqlite semantics: NULL never
+  matches in a join condition (not even NULL = NULL), `LEFT JOIN` pads
+  unmatched rows with NULL, `USING` columns are merged for `*` (emitted once,
+  at the leftmost position) and for unqualified references (resolved to the
+  leftmost table of the merged component; a chain of `USING` merges across
+  all tables). Ambiguous unqualified columns, unknown tables/columns (at
+  prepare time, even on empty tables) and unparseable join syntax fail
+  cleanly. Table aliases and RIGHT/FULL/NATURAL joins are not implemented yet
+  (rejected with a clean error).
 
 The runner CLI is the project's test seam — every later slice is accepted
 through it.

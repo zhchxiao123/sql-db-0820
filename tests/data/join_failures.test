@@ -1,0 +1,113 @@
+# Join failure paths — a5 acceptance data.
+# Invalid table/column references and unparseable join syntax are judged as
+# failures; the runner keeps going and exits non-zero instead of crashing.
+
+statement ok
+CREATE TABLE t1(a INTEGER, b INTEGER);
+
+statement ok
+CREATE TABLE t2(a INTEGER, c TEXT);
+
+statement ok
+INSERT INTO t1 VALUES (1, 2), (2, 4);
+
+statement ok
+INSERT INTO t2 VALUES (1, 'x'), (3, 'z');
+
+# joining a table that does not exist
+statement error
+SELECT * FROM t1 JOIN nope ON t1.a = nope.b;
+
+# column does not exist on the right side of the join
+statement error
+SELECT * FROM t1 JOIN t2 ON t1.a = t2.nope;
+
+# qualified column does not exist
+statement error
+SELECT t1.nope FROM t1 JOIN t2 ON t1.a = t2.a;
+
+# unqualified column present in both tables (not merged) is ambiguous
+statement error
+SELECT a FROM t1 JOIN t2 ON t1.a = t2.a;
+
+# USING column missing from one side
+statement error
+SELECT * FROM t1 JOIN t2 USING (z);
+
+# qualified star on a table not in FROM
+statement error
+SELECT nope.* FROM t1 JOIN t2 ON 1;
+
+# ON condition referencing a table not joined yet
+statement ok
+CREATE TABLE t3(c INTEGER);
+
+statement error
+SELECT * FROM t1 JOIN t2 ON t1.a = t3.c;
+
+# same table joined twice without an alias cannot be disambiguated
+statement error
+SELECT * FROM t1 JOIN t1 ON t1.a = t1.a;
+
+# join types outside this slice are rejected cleanly
+statement error
+SELECT * FROM t1 RIGHT JOIN t2 ON t1.a = t2.a;
+
+statement error
+SELECT * FROM t1 FULL JOIN t2 ON t1.a = t2.a;
+
+statement error
+SELECT * FROM t1 NATURAL JOIN t2;
+
+# table aliases are not implemented yet: rejected cleanly
+statement error
+SELECT * FROM t1 AS x JOIN t2 AS y ON x.a = y.a;
+
+# incomplete join syntax
+statement error
+SELECT * FROM t1 JOIN;
+
+statement error
+SELECT * FROM t1 JOIN t2 ON;
+
+statement error
+SELECT * FROM t1 JOIN t2 USING;
+
+# intentional failure: a bad join run as `statement ok` is judged failed
+statement ok
+SELECT * FROM t1 JOIN nope ON t1.a = nope.b;
+
+# valid records after the failures still run
+query IIIT
+SELECT * FROM t1 JOIN t2 ON t1.a = t2.a ORDER BY t1.a;
+----
+1
+2
+1
+x
+
+query IIIT
+SELECT * FROM t1 LEFT JOIN t2 ON t1.a = t2.a ORDER BY t1.a;
+----
+1
+2
+1
+x
+2
+4
+NULL
+NULL
+
+query IT
+SELECT t1.b, t2.c FROM t1 LEFT JOIN t2 ON t1.a = t2.a WHERE t2.a IS NULL;
+----
+4
+NULL
+
+query IIIT
+SELECT * FROM t1, t2 WHERE t1.a = t2.a;
+----
+1
+2
+1
+x
