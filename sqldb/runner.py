@@ -340,7 +340,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     engine = Engine()
     total_passed = total_failed = total_skipped = 0
     for fname in args.files:
-        p, f, s = run_file(Path(fname), engine, verbose=args.verbose)
+        # Each test file runs against a fresh engine, like the reference
+        # sqllogictest tool (a separate database connection per file).
+        p, f, s = run_file(Path(fname), Engine(), verbose=args.verbose)
         total_passed += p
         total_failed += f
         total_skipped += s

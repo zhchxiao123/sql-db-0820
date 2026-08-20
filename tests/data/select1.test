@@ -1,0 +1,178 @@
+# Single-table basic queries — a1/a2/a3 acceptance data (select1.test style).
+
+statement ok
+CREATE TABLE t(a INTEGER, b TEXT, c REAL);
+
+statement ok
+INSERT INTO t VALUES (1, 'one', 1.5), (2, 'two', 2.5), (3, 'three', 3.5);
+
+# a1: SELECT * returns all rows in insertion order
+query ITR
+SELECT * FROM t;
+----
+1
+one
+1.5
+2
+two
+2.5
+3
+three
+3.5
+
+# a2: WHERE equality
+query ITR
+SELECT * FROM t WHERE a = 2;
+----
+2
+two
+2.5
+
+query ITR
+SELECT * FROM t WHERE b = 'two';
+----
+2
+two
+2.5
+
+# a2: WHERE range
+query ITR
+SELECT * FROM t WHERE a > 1;
+----
+2
+two
+2.5
+3
+three
+3.5
+
+query ITR
+SELECT * FROM t WHERE a >= 2 AND a < 3;
+----
+2
+two
+2.5
+
+# a2: WHERE AND / OR
+query ITR
+SELECT * FROM t WHERE a = 1 OR a = 3;
+----
+1
+one
+1.5
+3
+three
+3.5
+
+query ITR
+SELECT * FROM t WHERE a > 0 AND b LIKE 't%';
+----
+2
+two
+2.5
+3
+three
+3.5
+
+# a2: WHERE IS NULL / IS NOT NULL
+statement ok
+INSERT INTO t VALUES (NULL, 'none', NULL);
+
+query ITR
+SELECT * FROM t WHERE a IS NULL;
+----
+NULL
+none
+NULL
+
+query ITR
+SELECT * FROM t WHERE a IS NOT NULL;
+----
+1
+one
+1.5
+2
+two
+2.5
+3
+three
+3.5
+
+# a2: WHERE LIKE (case-insensitive) / NOT LIKE
+query ITR
+SELECT * FROM t WHERE b LIKE 't%';
+----
+2
+two
+2.5
+3
+three
+3.5
+
+query ITR
+SELECT * FROM t WHERE b NOT LIKE 't%';
+----
+1
+one
+1.5
+NULL
+none
+NULL
+
+# a3: cross-type comparison with sqlite type affinity
+statement ok
+CREATE TABLE m(a INTEGER);
+
+statement ok
+INSERT INTO m VALUES (1), ('2'), ('abc'), (3.5), (NULL);
+
+query I
+SELECT * FROM m WHERE a < 10;
+----
+1
+2
+3.5
+
+query I
+SELECT * FROM m WHERE a = '2';
+----
+2
+
+query I
+SELECT * FROM m WHERE a IS NULL;
+----
+NULL
+
+# TEXT affinity column compared to a number (rule 2: number -> text)
+statement ok
+CREATE TABLE tb(b TEXT);
+
+statement ok
+INSERT INTO tb VALUES ('5'), ('abc'), (7);
+
+query T
+SELECT * FROM tb WHERE b = 5;
+----
+5
+
+query T
+SELECT * FROM tb WHERE b < '9';
+----
+5
+7
+
+# projection and expressions over columns
+query IT
+SELECT a, b FROM t WHERE a = 1;
+----
+1
+one
+
+query IR
+SELECT a+1, c*2 FROM t WHERE a = 1;
+----
+2
+3.0
+
+statement ok
+SELECT 1;

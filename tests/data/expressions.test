@@ -331,7 +331,7 @@ statement error
 SELECT * FROM t;
 
 statement error
-CREATE TABLE t1(x);
+DROP TABLE t1;
 
 statement ok
 SELECT 'a', 1+1, NULL;
