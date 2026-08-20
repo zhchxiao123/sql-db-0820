@@ -47,8 +47,24 @@ sqllogictest corpus. Work in progress.
   leftmost table of the merged component; a chain of `USING` merges across
   all tables). Ambiguous unqualified columns, unknown tables/columns (at
   prepare time, even on empty tables) and unparseable join syntax fail
-  cleanly. Table aliases and RIGHT/FULL/NATURAL joins are not implemented yet
-  (rejected with a clean error).
+  cleanly. RIGHT/FULL/NATURAL joins are not implemented yet (rejected with a
+  clean error).
+* **Table aliases** — `FROM t AS x` / `FROM t x` and `JOIN ... AS x`. Once
+  aliased, only the alias is visible for qualified references (sqlite
+  behavior). Required for correlated self-references.
+* **Subqueries** — scalar subqueries in expressions (`(SELECT ...)`, 0 rows
+  -> NULL, multi-column -> ``sub-select returns N columns`` error),
+  `IN`/`NOT IN (SELECT ...)` and `EXISTS (SELECT ...)` with sqlite's
+  three-valued NULL logic (NULL left operand -> NULL when the set is
+  non-empty, else 0; no match with NULL in the set -> NULL), correlated
+  subqueries (inner scope wins, outer columns fall through; arbitrary
+  nesting), and `FROM (SELECT ...) [AS] d` derived tables (multi-level
+  nesting, materialized once, output columns named after the select list
+  with affinity preserved, cannot reference outer columns like sqlite).
+  Select-list aliases (`expr AS name`) are usable in `ORDER BY` / `GROUP BY`
+  (output name wins, sqlite behavior). Subquery failures (missing table or
+  column, multi-column scalar/IN, unparseable SQL) fail the statement
+  cleanly instead of crashing.
 
 The runner CLI is the project's test seam — every later slice is accepted
 through it.
@@ -113,10 +129,12 @@ Declared column types map to affinities (`INT` -> INTEGER, `CHAR/CLOB/TEXT`
 * **ORDER BY / DISTINCT / LIMIT** follow sqlite: ORDER BY orders NULL
   smallest (ASC first / DESC last), then numbers, then text (byte-wise);
   integer ORDER BY terms are 1-based output ordinals (out-of-range is an
-  error); DISTINCT collapses NULLs and compares numbers numerically
-  (`5 == 5.0`, but `5 != '5'` without affinity); LIMIT/OFFSET evaluate to
-  integers (NULL/float is a "datatype mismatch" error), negative LIMIT
-  means no limit, negative OFFSET means 0, and ORDER BY runs before LIMIT.
+  error); a bare column name matching an output alias uses the projected
+  value (alias wins, sqlite behavior); DISTINCT collapses NULLs and compares
+  numbers numerically (`5 == 5.0`, but `5 != '5'` without affinity);
+  LIMIT/OFFSET evaluate to integers (NULL/float is a "datatype mismatch"
+  error), negative LIMIT means no limit, negative OFFSET means 0, and ORDER
+  BY runs before LIMIT.
 * **Storage is in-memory** per engine instance; the runner gives each test
   file a fresh engine (like a fresh sqlite connection per file). Durability
   is out of scope for this slice.

@@ -221,6 +221,18 @@ class TestRunFile(unittest.TestCase):
         # the valid record at the end still ran and passed
         self.assertGreater(p, 0)
 
+    def test_subquery_file_all_pass(self):
+        p, f, s = run_file(DATA / "subquery.test", Engine(), verbose=False)
+        self.assertEqual(f, 0)
+        self.assertGreater(p, 0)
+
+    def test_subquery_failures_file_all_pass(self):
+        # every record expects a statement error; the runner must judge each
+        # as failed-statement and keep going
+        p, f, s = run_file(DATA / "subquery_failures.test", Engine(), verbose=False)
+        self.assertEqual(f, 0)
+        self.assertGreater(p, 0)
+
     def test_missing_file_is_a_failure(self):
         p, f, s = run_file(DATA / "does-not-exist.test", Engine(), verbose=False)
         self.assertEqual(f, 1)
@@ -232,6 +244,8 @@ class TestCliExitCode(unittest.TestCase):
             str(DATA / "expressions.test"),
             str(DATA / "hash.test"),
             str(DATA / "statements.test"),
+            str(DATA / "subquery.test"),
+            str(DATA / "subquery_failures.test"),
         )
         self.assertEqual(code, 0, out)
         self.assertIn("TOTAL:", out)

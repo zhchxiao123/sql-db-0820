@@ -525,6 +525,136 @@ class SqliteParityTest(unittest.TestCase):
             "SELECT * FROM t1 JOIN t1 ON t1.a = t1.a;",
         ])
 
+    # -- slice 5: subqueries --------------------------------------------------
+
+    def test_scalar_subquery_battery(self):
+        self.assert_parity([
+            "CREATE TABLE t1(a INTEGER, b TEXT);",
+            "INSERT INTO t1 VALUES (1,'x'),(2,'y'),(3,'z');",
+            "CREATE TABLE t2(c INTEGER);",
+            "INSERT INTO t2 VALUES (10),(20);",
+            "SELECT (SELECT 1);",
+            "SELECT (SELECT c FROM t2 WHERE c = 10);",
+            "SELECT (SELECT c FROM t2 WHERE c = 99);",
+            "SELECT (SELECT c FROM t2);",
+            "SELECT a, (SELECT c FROM t2 WHERE c = a*10) FROM t1 ORDER BY a;",
+            "SELECT a, (SELECT COUNT(*) FROM t2 WHERE c > a*5) FROM t1 ORDER BY a;",
+            "SELECT a, (SELECT SUM(c) FROM t2 WHERE c < a*15) FROM t1 ORDER BY a;",
+            "SELECT a, (SELECT MAX(c) FROM t2 WHERE c <= a*10) FROM t1 ORDER BY a;",
+            "SELECT (SELECT b FROM t1 WHERE a = 1);",
+            "SELECT (SELECT b FROM t1 WHERE a = 99);",
+            "SELECT (SELECT (SELECT a FROM t1 WHERE a = 1));",
+            "SELECT (SELECT 1), (SELECT 'a');",
+            "SELECT CASE WHEN (SELECT COUNT(*) FROM t2) > 1 THEN 'many' ELSE 'few' END;",
+            "SELECT a FROM t1 WHERE (SELECT COUNT(*) FROM t2) > 0 ORDER BY a;",
+            "SELECT a FROM t1 ORDER BY (SELECT COUNT(*) FROM t2 WHERE c > a*5), a;",
+        ])
+
+    def test_in_exists_battery(self):
+        self.assert_parity([
+            "CREATE TABLE t1(a INTEGER);",
+            "INSERT INTO t1 VALUES (1),(2);",
+            "CREATE TABLE t2(c INTEGER);",
+            "INSERT INTO t2 VALUES (10),(20);",
+            "SELECT a FROM t1 WHERE a IN (SELECT c/10 FROM t2) ORDER BY a;",
+            "SELECT a FROM t1 WHERE a NOT IN (SELECT c/10 FROM t2) ORDER BY a;",
+            "SELECT 1 IN (SELECT c FROM t2);",
+            "SELECT 5 IN (SELECT c FROM t2);",
+            "SELECT NULL IN (SELECT c FROM t2);",
+            "SELECT 5 IN (SELECT c FROM t2 WHERE 0);",
+            "SELECT NULL IN (SELECT c FROM t2 WHERE 0);",
+            "SELECT NULL NOT IN (SELECT c FROM t2 WHERE 0);",
+            "SELECT EXISTS (SELECT c FROM t2);",
+            "SELECT EXISTS (SELECT c FROM t2 WHERE c = 99);",
+            "SELECT a FROM t1 WHERE EXISTS (SELECT 1 FROM t2 WHERE c = a*10) ORDER BY a;",
+            "SELECT a FROM t1 WHERE NOT EXISTS (SELECT 1 FROM t2 WHERE c = a*10+1) ORDER BY a;",
+            # NULL three-valued logic
+            "CREATE TABLE n(v INTEGER);",
+            "INSERT INTO n VALUES (NULL),(2);",
+            "SELECT 1 IN (SELECT v FROM n);",
+            "SELECT 2 IN (SELECT v FROM n);",
+            "SELECT NULL IN (SELECT v FROM n);",
+            "SELECT 1 NOT IN (SELECT v FROM n);",
+            "SELECT 2 NOT IN (SELECT v FROM n);",
+            "SELECT 3 IN (SELECT v FROM n);",
+            "SELECT 3 NOT IN (SELECT v FROM n);",
+            # affinity in IN
+            "CREATE TABLE s(x TEXT);",
+            "INSERT INTO s VALUES ('5');",
+            "SELECT 5 IN (SELECT x FROM s);",
+            "CREATE TABLE i(y INTEGER);",
+            "INSERT INTO i VALUES (5);",
+            "SELECT '5' IN (SELECT y FROM i);",
+        ])
+
+    def test_derived_table_battery(self):
+        self.assert_parity([
+            "CREATE TABLE t1(a INTEGER, b TEXT);",
+            "INSERT INTO t1 VALUES (1,'x'),(2,'y'),(3,'z');",
+            "CREATE TABLE t2(c INTEGER);",
+            "INSERT INTO t2 VALUES (10),(20);",
+            "SELECT * FROM (SELECT 1);",
+            "SELECT * FROM (SELECT 1) AS d;",
+            "SELECT d.x FROM (SELECT 1 AS x) AS d;",
+            "SELECT * FROM (SELECT a, a+1 AS p FROM t1) AS d ORDER BY a;",
+            "SELECT * FROM (SELECT * FROM t1) AS d ORDER BY a;",
+            "SELECT * FROM (SELECT * FROM (SELECT a FROM t1) AS e) AS d ORDER BY a;",
+            "SELECT COUNT(*) FROM (SELECT a FROM t1);",
+            "SELECT d.a, t2.c FROM (SELECT a FROM t1) AS d JOIN t2 ON d.a*10 = t2.c ORDER BY d.a;",
+            "SELECT * FROM (SELECT a FROM t1) AS d LEFT JOIN t2 ON d.a*10 = t2.c ORDER BY d.a;",
+            "SELECT * FROM (SELECT b, COUNT(*) AS n FROM t1 GROUP BY b) AS g ORDER BY b;",
+            "SELECT * FROM (SELECT a FROM t1 ORDER BY a DESC LIMIT 1) AS d;",
+            "SELECT * FROM (SELECT a FROM t1) AS d1 JOIN (SELECT a FROM t1) AS d2 USING (a) ORDER BY a;",
+            # empty derived + LEFT JOIN pad
+            "CREATE TABLE ee(x INTEGER);",
+            "SELECT COUNT(*) FROM (SELECT x FROM ee) AS d;",
+            "SELECT t1.a FROM t1 LEFT JOIN (SELECT x FROM ee) AS d ON t1.a = d.x ORDER BY t1.a;",
+        ])
+
+    def test_correlated_alias_battery(self):
+        self.assert_parity([
+            "CREATE TABLE t1(a INTEGER, b TEXT);",
+            "INSERT INTO t1 VALUES (1,'x'),(2,'y');",
+            "CREATE TABLE t2(c INTEGER);",
+            "INSERT INTO t2 VALUES (10),(20);",
+            "SELECT x.a FROM t1 AS x WHERE x.a = 2;",
+            "SELECT a, (SELECT c FROM t2 AS y WHERE y.c = x.a*10) FROM t1 AS x ORDER BY a;",
+            "SELECT t1.a FROM t1 WHERE t1.a IN (SELECT t2.c/10 FROM t2 WHERE t2.c > t1.a*5) ORDER BY t1.a;",
+            # 2-level correlation
+            "CREATE TABLE outer1(a INTEGER);",
+            "INSERT INTO outer1 VALUES (1),(2);",
+            "CREATE TABLE mid(b INTEGER);",
+            "INSERT INTO mid VALUES (1),(2),(3);",
+            "SELECT a FROM outer1 WHERE EXISTS (SELECT 1 FROM mid WHERE EXISTS (SELECT 1 FROM t2 WHERE t2.c = mid.b*10 AND t2.c > outer1.a*10)) ORDER BY a;",
+            # scalar over LEFT JOIN padded NULL
+            "CREATE TABLE l(k INTEGER);",
+            "INSERT INTO l VALUES (1),(2);",
+            "CREATE TABLE r(k INTEGER, v INTEGER);",
+            "INSERT INTO r VALUES (2, 99);",
+            "SELECT l.k, (SELECT v FROM r WHERE r.k = l.k) FROM l LEFT JOIN r ON l.k = r.k ORDER BY l.k;",
+            # aliases in ORDER BY / GROUP BY
+            "SELECT a AS z FROM t1 ORDER BY z;",
+            "SELECT a AS m FROM t1 GROUP BY m ORDER BY m;",
+            "SELECT a FROM t1 LIMIT (SELECT 1);",
+        ])
+
+    def test_subquery_errors_agree(self):
+        self.assert_parity([
+            "CREATE TABLE t1(a INTEGER);",
+            "INSERT INTO t1 VALUES (1),(2);",
+            "CREATE TABLE t2(c INTEGER);",
+            "INSERT INTO t2 VALUES (10);",
+            "SELECT (SELECT a, a FROM t1);",
+            "SELECT (SELECT a, a FROM t1 WHERE 0);",
+            "SELECT 1 IN (SELECT c, c FROM t2);",
+            "SELECT a FROM t1 WHERE a IN (SELECT z FROM t2);",
+            "SELECT a FROM t1 WHERE a IN (SELECT c FROM nosuch);",
+            "SELECT (SELECT c FROM nosuch);",
+            "SELECT (SELECT z FROM t1);",
+            "SELECT * FROM (SELECT z FROM t2) AS d;",
+            "SELECT * FROM (SELECT c FROM nosuch) AS d;",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()
