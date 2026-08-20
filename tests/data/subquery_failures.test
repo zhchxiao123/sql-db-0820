@@ -1,0 +1,59 @@
+# Subquery failure paths - a5.
+# Each record must fail with a statement error (missing table/column,
+# multi-column scalar/IN, or syntax); the runner continues and exits
+# non-zero only when a record actually fails. No record here is expected
+# to pass - they are all deliberately broken statements.
+
+statement ok
+CREATE TABLE t1(a INTEGER, b TEXT);
+
+statement ok
+INSERT INTO t1 VALUES (1,'x'),(2,'y');
+
+statement ok
+CREATE TABLE t2(c INTEGER);
+
+statement ok
+INSERT INTO t2 VALUES (10);
+
+statement ok
+CREATE TABLE n(v INTEGER);
+
+statement ok
+INSERT INTO n VALUES (NULL),(2);
+
+statement error no such column
+SELECT a FROM t1 WHERE a IN (SELECT z FROM t2);
+
+statement error no such table
+SELECT a FROM t1 WHERE a IN (SELECT c FROM nosuch);
+
+statement error no such table
+SELECT (SELECT c FROM nosuch);
+
+statement error no such column
+SELECT (SELECT z FROM t1);
+
+statement error no such column
+SELECT * FROM (SELECT z FROM t2) AS d;
+
+statement error no such table
+SELECT * FROM (SELECT c FROM nosuch) AS d;
+
+statement error sub-select returns 2 columns
+SELECT (SELECT a, b FROM t1);
+
+statement error sub-select returns 2 columns
+SELECT (SELECT a, b FROM t1 WHERE 0);
+
+statement error sub-select returns 2 columns
+SELECT 1 IN (SELECT c, c FROM t2);
+
+statement error expected
+SELECT 1 IN (SELECT c FROM t2;
+
+statement error unexpected
+SELECT a FROM t1 WHERE a IN (SELECT);
+
+statement error unexpected
+SELECT (SELECT);

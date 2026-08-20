@@ -59,8 +59,9 @@ SELECT * FROM t1 FULL JOIN t2 ON t1.a = t2.a;
 statement error
 SELECT * FROM t1 NATURAL JOIN t2;
 
-# table aliases are not implemented yet: rejected cleanly
-statement error
+# table aliases are supported since the subquery slice (correlated
+# self-references need them); joining through aliases works
+statement ok
 SELECT * FROM t1 AS x JOIN t2 AS y ON x.a = y.a;
 
 # incomplete join syntax

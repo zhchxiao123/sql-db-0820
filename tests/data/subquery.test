@@ -1,0 +1,418 @@
+# Subqueries (scalar / IN / EXISTS / correlated / derived tables) - a1-a4 acceptance data.
+# Golden values generated from the real sqlite3 (stdlib 3.46.1);
+# ORDER BY makes output deterministic.
+
+statement ok
+CREATE TABLE t1(a INTEGER, b TEXT);
+
+statement ok
+INSERT INTO t1 VALUES (1,'x'),(2,'y'),(3,'z');
+
+statement ok
+CREATE TABLE t2(c INTEGER);
+
+statement ok
+INSERT INTO t2 VALUES (10),(20);
+
+query I rowsort
+SELECT (SELECT 1);
+----
+1
+
+query I rowsort
+SELECT (SELECT c FROM t2 WHERE c = 10);
+----
+10
+
+query T rowsort
+SELECT (SELECT c FROM t2 WHERE c = 99);
+----
+NULL
+
+query I rowsort
+SELECT (SELECT c FROM t2);
+----
+10
+
+query IIIIIT rowsort
+SELECT a, (SELECT c FROM t2 WHERE c = a*10) FROM t1 ORDER BY a;
+----
+1
+10
+2
+20
+3
+NULL
+
+query IIIIII rowsort
+SELECT a, (SELECT COUNT(*) FROM t2 WHERE c > a*5) FROM t1 ORDER BY a;
+----
+1
+2
+2
+1
+3
+1
+
+query IIIIII rowsort
+SELECT a, (SELECT SUM(c) FROM t2 WHERE c < a*15) FROM t1 ORDER BY a;
+----
+1
+10
+2
+30
+3
+30
+
+query IIIIII rowsort
+SELECT a, (SELECT MAX(c) FROM t2 WHERE c <= a*10) FROM t1 ORDER BY a;
+----
+1
+10
+2
+20
+3
+20
+
+query T rowsort
+SELECT (SELECT b FROM t1 WHERE a = 1);
+----
+x
+
+query T rowsort
+SELECT (SELECT b FROM t1 WHERE a = 99);
+----
+NULL
+
+query I rowsort
+SELECT (SELECT (SELECT a FROM t1 WHERE a = 1));
+----
+1
+
+query T rowsort
+SELECT CASE WHEN (SELECT COUNT(*) FROM t2) > 1 THEN 'many' ELSE 'few' END;
+----
+many
+
+query IT rowsort
+SELECT (SELECT 1), (SELECT 'a');
+----
+1
+a
+
+query II rowsort
+SELECT a FROM t1 WHERE a IN (SELECT c/10 FROM t2) ORDER BY a;
+----
+1
+2
+
+query I rowsort
+SELECT a FROM t1 WHERE a NOT IN (SELECT c/10 FROM t2) ORDER BY a;
+----
+3
+
+query I rowsort
+SELECT 1 IN (SELECT c FROM t2);
+----
+0
+
+query I rowsort
+SELECT 5 IN (SELECT c FROM t2);
+----
+0
+
+query T rowsort
+SELECT NULL IN (SELECT c FROM t2);
+----
+NULL
+
+query I rowsort
+SELECT 5 IN (SELECT c FROM t2 WHERE 0);
+----
+0
+
+query I rowsort
+SELECT NULL IN (SELECT c FROM t2 WHERE 0);
+----
+0
+
+query I rowsort
+SELECT NULL NOT IN (SELECT c FROM t2 WHERE 0);
+----
+1
+
+query II rowsort
+SELECT a FROM t1 WHERE EXISTS (SELECT 1 FROM t2 WHERE c = a*10) ORDER BY a;
+----
+1
+2
+
+query III rowsort
+SELECT a FROM t1 WHERE NOT EXISTS (SELECT 1 FROM t2 WHERE c = a*10+1) ORDER BY a;
+----
+1
+2
+3
+
+query I rowsort
+SELECT EXISTS (SELECT c FROM t2);
+----
+1
+
+query I rowsort
+SELECT EXISTS (SELECT c FROM t2 WHERE c = 99);
+----
+0
+
+statement ok
+CREATE TABLE n(v INTEGER);
+
+statement ok
+INSERT INTO n VALUES (NULL),(2);
+
+query T rowsort
+SELECT 1 IN (SELECT v FROM n);
+----
+NULL
+
+query I rowsort
+SELECT 2 IN (SELECT v FROM n);
+----
+1
+
+query T rowsort
+SELECT NULL IN (SELECT v FROM n);
+----
+NULL
+
+query T rowsort
+SELECT 1 NOT IN (SELECT v FROM n);
+----
+NULL
+
+query I rowsort
+SELECT 2 NOT IN (SELECT v FROM n);
+----
+0
+
+query T rowsort
+SELECT 3 IN (SELECT v FROM n);
+----
+NULL
+
+query T rowsort
+SELECT 3 NOT IN (SELECT v FROM n);
+----
+NULL
+
+query I rowsort
+SELECT * FROM (SELECT 1);
+----
+1
+
+query I rowsort
+SELECT * FROM (SELECT 1) AS d;
+----
+1
+
+query I rowsort
+SELECT d.x FROM (SELECT 1 AS x) AS d;
+----
+1
+
+query IIIIII rowsort
+SELECT * FROM (SELECT a, a+1 AS p FROM t1) AS d ORDER BY a;
+----
+1
+2
+2
+3
+3
+4
+
+query ITITIT rowsort
+SELECT * FROM (SELECT * FROM t1) AS d ORDER BY a;
+----
+1
+x
+2
+y
+3
+z
+
+query III rowsort
+SELECT * FROM (SELECT * FROM (SELECT a FROM t1) AS e) AS d ORDER BY a;
+----
+1
+2
+3
+
+query I rowsort
+SELECT COUNT(*) FROM (SELECT a FROM t1);
+----
+3
+
+query IIII rowsort
+SELECT d.a, t2.c FROM (SELECT a FROM t1) AS d JOIN t2 ON d.a*10 = t2.c ORDER BY d.a;
+----
+1
+10
+2
+20
+
+query IIIIIT rowsort
+SELECT * FROM (SELECT a FROM t1) AS d LEFT JOIN t2 ON d.a*10 = t2.c ORDER BY d.a;
+----
+1
+10
+2
+20
+3
+NULL
+
+query TITITI rowsort
+SELECT * FROM (SELECT b, COUNT(*) AS n FROM t1 GROUP BY b) AS g ORDER BY b;
+----
+x
+1
+y
+1
+z
+1
+
+query I rowsort
+SELECT * FROM (SELECT a FROM t1 ORDER BY a DESC LIMIT 1) AS d;
+----
+3
+
+query III rowsort
+SELECT * FROM (SELECT a FROM t1) AS d1 JOIN (SELECT a FROM t1) AS d2 USING (a) ORDER BY a;
+----
+1
+2
+3
+
+query I rowsort
+SELECT x.a FROM t1 AS x WHERE x.a = 2;
+----
+2
+
+query IIIIIT rowsort
+SELECT a, (SELECT c FROM t2 AS y WHERE y.c = x.a*10) FROM t1 AS x ORDER BY a;
+----
+1
+10
+2
+20
+3
+NULL
+
+query II rowsort
+SELECT t1.a FROM t1 WHERE t1.a IN (SELECT t2.c/10 FROM t2 WHERE t2.c > t1.a*5) ORDER BY t1.a;
+----
+1
+2
+
+statement ok
+CREATE TABLE outer1(a INTEGER);
+
+statement ok
+INSERT INTO outer1 VALUES (1),(2);
+
+statement ok
+CREATE TABLE mid(b INTEGER);
+
+statement ok
+INSERT INTO mid VALUES (1),(2),(3);
+
+query I rowsort
+SELECT a FROM outer1 WHERE EXISTS (SELECT 1 FROM mid WHERE EXISTS (SELECT 1 FROM t2 WHERE t2.c = mid.b*10 AND t2.c > outer1.a*10)) ORDER BY a;
+----
+1
+
+query III rowsort
+SELECT a AS z FROM t1 ORDER BY z;
+----
+1
+2
+3
+
+query III rowsort
+SELECT a AS m FROM t1 GROUP BY m ORDER BY m;
+----
+1
+2
+3
+
+query TITITI rowsort
+SELECT b, COUNT(*) AS n FROM t1 GROUP BY b ORDER BY n DESC, b;
+----
+x
+1
+y
+1
+z
+1
+
+query I rowsort
+SELECT a FROM t1 LIMIT (SELECT 1);
+----
+1
+
+statement ok
+CREATE TABLE l(k INTEGER);
+
+statement ok
+INSERT INTO l VALUES (1),(2);
+
+statement ok
+CREATE TABLE r(k INTEGER, v INTEGER);
+
+statement ok
+INSERT INTO r VALUES (2, 99);
+
+query ITII rowsort
+SELECT l.k, (SELECT v FROM r WHERE r.k = l.k) FROM l LEFT JOIN r ON l.k = r.k ORDER BY l.k;
+----
+1
+NULL
+2
+99
+
+statement ok
+CREATE TABLE ee(x INTEGER);
+
+query I rowsort
+SELECT COUNT(*) FROM (SELECT x FROM ee) AS d;
+----
+0
+
+query III rowsort
+SELECT t1.a FROM t1 LEFT JOIN (SELECT x FROM ee) AS d ON t1.a = d.x ORDER BY t1.a;
+----
+1
+2
+3
+
+statement ok
+CREATE TABLE s(x TEXT);
+
+statement ok
+INSERT INTO s VALUES ('5');
+
+query I rowsort
+SELECT 5 IN (SELECT x FROM s);
+----
+1
+
+statement ok
+CREATE TABLE i(y INTEGER);
+
+statement ok
+INSERT INTO i VALUES (5);
+
+query I rowsort
+SELECT '5' IN (SELECT y FROM i);
+----
+1
+
