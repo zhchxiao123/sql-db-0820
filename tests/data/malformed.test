@@ -1,0 +1,43 @@
+# Malformed protocol file — a4 acceptance data.
+# The runner must judge malformed constructs as failures, keep processing,
+# and exit non-zero, without crashing or hanging.
+
+# 1. statement with an unknown mode: reported as a parse issue.
+statement maybe
+SELECT 1;
+
+# 2. query record missing the '----' separator.
+query I
+SELECT 1;
+
+# 3. query with a result count that does not match the actual output.
+query I
+SELECT 1;
+----
+99
+
+# 4. query whose expected values differ from the actual output.
+query I
+SELECT 1;
+----
+2
+
+# 5. query with a hash expectation but wrong hash / count.
+query I
+SELECT 1, 2;
+----
+3 values hashing to 00000000000000000000000000000000
+
+# 6. garbage line at record level.
+this is not a valid record header
+SELECT 1;
+
+# 7. a valid record after all the broken ones — must still run.
+query I
+SELECT 1;
+----
+1
+
+# 8. unterminated string literal in SQL: clean engine error, not a crash.
+statement ok
+SELECT 'oops;

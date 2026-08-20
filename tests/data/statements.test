@@ -1,0 +1,40 @@
+# statement ok/error/count records — a1 acceptance data.
+# All records in this file must pass: statement ok succeeds, statement error
+# fails cleanly (illegal SQL is judged as a failure for ok, as a success for
+# error), and the runner keeps going after each one.
+
+statement ok
+SELECT 1;
+
+statement ok
+SELECT 1+2*3, 'ok';
+
+statement ok
+SELECT NULL IS NULL;
+
+statement ok
+SELECT '';
+
+statement error
+SELECT 1 +;
+
+statement error
+SELECT * FROM t;
+
+statement error
+SELECT unknown_column;
+
+statement error
+CREATE TABLE t1(x, y);
+
+statement error
+SELECT 3 values hashing to deadbeef;
+
+statement error
+SELECT 'oops;
+
+statement error
+INSERT INTO t VALUES (1);
+
+statement ok
+SELECT 'a', 1+1, NULL;
