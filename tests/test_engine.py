@@ -112,10 +112,14 @@ class TestComparison(unittest.TestCase):
         self.assertEqual(values("SELECT 'a'='b';"), ["0"])
 
     def test_mixed_numeric_text(self):
-        self.assertEqual(values("SELECT 5='5';"), ["1"])
+        # No affinity on bare literals: numbers sort before text, and a
+        # number never equals text (verified against sqlite3).
+        self.assertEqual(values("SELECT 5='5';"), ["0"])
+        self.assertEqual(values("SELECT '5'=5;"), ["0"])
         self.assertEqual(values("SELECT 5<='5';"), ["1"])
         self.assertEqual(values("SELECT 5<'abc';"), ["1"])
         self.assertEqual(values("SELECT 5='abc';"), ["0"])
+        self.assertEqual(values("SELECT 5=5.0;"), ["1"])
 
     def test_null_comparison_is_null(self):
         self.assertEqual(values("SELECT NULL=1;"), ["NULL"])
@@ -202,7 +206,7 @@ class TestErrors(unittest.TestCase):
 
     def test_unsupported_statements(self):
         self.assert_error("SELECT * FROM t;")
-        self.assert_error("CREATE TABLE t1(x);")
+        self.assert_error("DROP TABLE t;")
         self.assert_error("INSERT INTO t VALUES (1);")
         self.assert_error("SELECT x;", "no FROM clause")
 

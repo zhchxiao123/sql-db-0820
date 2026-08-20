@@ -1,27 +1,22 @@
-"""Minimal SQL expression engine for sql-db-0820.
+"""SQL engine for sql-db-0820: expression evaluation plus single-table storage.
 
-Scope of this slice: parse and evaluate the simplest SELECT statements —
-an expression list with no FROM clause — with sqlite-compatible value
-semantics and NULL handling.
+Built on the expression engine from slice 0. This slice adds:
 
-Supported language (subset of SQLite):
-  * literals: INTEGER, REAL, TEXT ('...' / "..." with doubled-quote escape),
-    NULL, TRUE, FALSE
-  * arithmetic: + - * / % with parentheses, unary +/-
-  * comparison: = == != <> < <= > >=
-  * logical: AND OR NOT (three-valued logic)
-  * IS / IS NOT (never yields NULL)
-  * CASE WHEN ... THEN ... [ELSE ...] END (searched and simple forms)
+  * CREATE TABLE (column names + declared types -> sqlite type affinity)
+  * INSERT (VALUES with optional column list, multi-row)
+  * DELETE (with or without WHERE)
+  * SELECT with FROM and WHERE; column references in expressions; ``*``
+  * sqlite type affinity: storage conversion and comparison rules
+  * LIKE / NOT LIKE (ASCII case-insensitive, % _ wildcards, ESCAPE)
 
-Statements outside this scope (FROM, DDL, DML, ...) produce an EngineError
-so that callers — in particular the sqllogictest runner — can judge the
-record as failed instead of crashing.
-
-Value model (mirrors SQLite's storage classes):
+Value model (mirrors SQLite storage classes):
     None   -> SQL NULL
     int    -> INTEGER
     float  -> REAL
     str    -> TEXT
+
+Statements outside this scope produce an EngineError so the sqllogictest
+runner can judge the record as failed instead of crashing.
 """
 
 from __future__ import annotations
@@ -29,7 +24,34 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+# ---------------------------------------------------------------------------
+# Affinity model
+# ---------------------------------------------------------------------------
+# SQLite type affinity, determined from the declared column type:
+#   contains INT            -> INTEGER
+#   contains CHAR/CLOB/TEXT -> TEXT
+#   contains BLOB or empty  -> NONE (BLOB)
+#   contains REAL/FLOA/DOUB -> REAL
+#   otherwise               -> NUMERIC
+
+_NUMERIC_AFFINITIES = ("INTEGER", "REAL", "NUMERIC")
+
+
+def affinity_of_type(declared: Optional[str]) -> str:
+    if not declared:
+        return "NONE"
+    t = declared.upper()
+    if "INT" in t:
+        return "INTEGER"
+    if "CHAR" in t or "CLOB" in t or "TEXT" in t:
+        return "TEXT"
+    if "BLOB" in t or t == "":
+        return "NONE"
+    if "REAL" in t or "FLOA" in t or "DOUB" in t:
+        return "REAL"
+    return "NUMERIC"
 
 
 class EngineError(Exception):
@@ -46,7 +68,7 @@ def is_number(v: Any) -> bool:
 
 
 def _text_to_number(s: str) -> Optional[Any]:
-    """Best-effort SQLite-style text -> number conversion."""
+    """SQLite-style text -> number conversion (integer, else real)."""
     if re.fullmatch(r"[+-]?\d+", s):
         return int(s)
     try:
@@ -72,29 +94,78 @@ def render_value(v: Any) -> str:
     return str(v)
 
 
-def _compare(a: Any, b: Any) -> Optional[int]:
-    """Three-way comparison following sqlite rules; None if either side NULL.
+def _convert_numeric(v: Any) -> Any:
+    """Apply NUMERIC affinity to a value: text -> number when possible."""
+    if isinstance(v, str):
+        n = _text_to_number(v)
+        return v if n is None else n
+    return v
 
-    - both numeric  -> numeric comparison
-    - mixed numeric/text: if the text converts to a number, compare
-      numerically; otherwise numbers sort before text
-    - both text -> byte-wise string comparison
+
+def _convert_text(v: Any) -> Any:
+    """Apply TEXT affinity to a value: number -> its text form."""
+    if is_number(v):
+        return render_value(v)
+    return v
+
+
+def _convert_to_affinity(v: Any, affinity: str) -> Any:
+    """Storage conversion applied when inserting into a column."""
+    if v is None:
+        return None
+    if affinity == "TEXT":
+        if is_number(v):
+            return render_value(v)
+        return v
+    if affinity in ("INTEGER", "NUMERIC"):
+        return _convert_numeric(v)
+    if affinity == "REAL":
+        if isinstance(v, str):
+            n = _text_to_number(v)
+            if n is not None:
+                return float(n)
+            return v
+        if isinstance(v, int):
+            return float(v)
+        return v
+    return v  # NONE (BLOB): store as-is
+
+
+def _binary_compare(a: Any, b: Any) -> Optional[int]:
+    """Three-way comparison with NO affinity applied (sqlite BINARY order).
+
+    Returns None if either side is NULL. Ordering: numbers compare
+    numerically; numbers sort before text; text compares byte-wise.
     """
     if a is None or b is None:
         return None
-    if is_number(a) and is_number(b):
+    an, bn = is_number(a), is_number(b)
+    if an and bn:
         return (a > b) - (a < b)
-    if is_number(a) and isinstance(b, str):
-        nb = _text_to_number(b)
-        if nb is not None:
-            return _compare(a, nb)
+    if an and isinstance(b, str):
         return -1  # number < text
-    if isinstance(a, str) and is_number(b):
-        na = _text_to_number(a)
-        if na is not None:
-            return _compare(na, b)
+    if isinstance(a, str) and bn:
         return 1  # text > number
     return (a > b) - (a < b)
+
+
+def apply_comparison_affinity(la: str, lv: Any, ra: str, rv: Any) -> Tuple[Any, Any]:
+    """Apply sqlite's affinity rules for a comparison between two operands.
+
+    Rule 1: an INTEGER/REAL/NUMERIC affinity operand converts the *other*
+            operand with NUMERIC affinity (text -> number when possible).
+    Rule 2: a TEXT affinity operand converts a no-affinity operand with
+            TEXT affinity (number -> text).
+    """
+    if la in _NUMERIC_AFFINITIES and ra not in _NUMERIC_AFFINITIES:
+        return lv, _convert_numeric(rv)
+    if ra in _NUMERIC_AFFINITIES and la not in _NUMERIC_AFFINITIES:
+        return _convert_numeric(lv), rv
+    if la == "TEXT" and ra == "NONE":
+        return lv, _convert_text(rv)
+    if ra == "TEXT" and la == "NONE":
+        return _convert_text(lv), rv
+    return lv, rv
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +176,8 @@ KEYWORDS = {
     "AND", "OR", "NOT", "NULL", "IS",
     "CASE", "WHEN", "THEN", "ELSE", "END",
     "TRUE", "FALSE", "SELECT",
+    "CREATE", "TABLE", "INSERT", "INTO", "VALUES", "DELETE",
+    "FROM", "WHERE", "LIKE", "ESCAPE",
 }
 
 _NUM_RE = re.compile(r"(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?")
@@ -125,7 +198,6 @@ class Token:
 
 
 def _scan_quoted(sql: str, i: int, quote: str) -> Tuple[str, int]:
-    """Scan a quoted literal; doubled quote is an escaped quote."""
     buf: List[str] = []
     j = i + 1
     n = len(sql)
@@ -198,23 +270,64 @@ def tokenize(sql: str) -> List[Token]:
 
 
 # ---------------------------------------------------------------------------
+# Tables
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ColumnDef:
+    name: str
+    affinity: str
+
+
+@dataclass
+class Table:
+    name: str
+    columns: List[ColumnDef]
+    rows: List[List[Any]] = field(default_factory=list)
+
+
+class RowContext:
+    """Binds a table row to column names for expression evaluation."""
+
+    __slots__ = ("affinity", "values")
+
+    def __init__(self, table: Table, row: List[Any]):
+        self.affinity = {c.name: c.affinity for c in table.columns}
+        self.values = {c.name: v for c, v in zip(table.columns, row)}
+
+    def value_of(self, name: str) -> Any:
+        if name not in self.values:
+            raise EngineError(f"no such column: {name}")
+        return self.values[name]
+
+    def affinity_of(self, name: str) -> str:
+        return self.affinity.get(name, "NONE")
+
+
+# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
-# AST nodes are tuples; the first element is the node kind:
-#   ('num', v) ('str', s) ('null',)
+# Expression AST nodes (first element is the node kind):
+#   ('num', v) ('str', s) ('null',) ('col', name)
 #   ('neg', e) ('add', l, r) ('sub', l, r) ('mul', l, r) ('div', l, r) ('mod', l, r)
-#   ('cmp', op, l, r) ('is', l, r, negate)
+#   ('cmp', op, l, r) ('is', l, r, negate) ('like', l, r, negate, esc)
 #   ('and', l, r) ('or', l, r) ('not', e)
 #   ('case', base|None, [(when, then), ...], else_|None)
+#   ('star',)  -- SELECT * item
 
 
 class Parser:
     def __init__(self, tokens: List[Token]):
         self.tokens = tokens
         self.pos = 0
+        self.allow_columns = False
 
     def peek(self) -> Token:
         return self.tokens[self.pos]
+
+    def peek2(self) -> Token:
+        nxt = self.pos + 1
+        return self.tokens[nxt] if nxt < len(self.tokens) else self.tokens[-1]
 
     def _next(self) -> Token:
         t = self.tokens[self.pos]
@@ -234,23 +347,168 @@ class Parser:
             raise EngineError(f"expected {kw}, got {t.value!r}")
         return t
 
-    def parse_select(self) -> List[Tuple]:
-        t = self.peek()
-        if t.kind == "kw" and t.value == "SELECT":
-            self._next()
-        else:
-            raise EngineError(f"expected SELECT, got {t.value!r}")
-        exprs = [self.parse_expr()]
-        while self.peek().kind == "op" and self.peek().value == ",":
-            self._next()
-            exprs.append(self.parse_expr())
+    def _name(self) -> str:
+        """Accept an identifier or keyword as a table/column name."""
+        t = self._next()
+        if t.kind not in ("id", "kw"):
+            raise EngineError(f"expected identifier, got {t.value!r}")
+        return t.value.lower()
+
+    def _finish(self) -> None:
         while self.peek().kind == "op" and self.peek().value == ";":
             self._next()
         if self.peek().kind != "eof":
-            raise EngineError(f"unexpected token {self.peek().value!r} after expression list")
-        return exprs
+            raise EngineError(f"unexpected token {self.peek().value!r}")
 
-    # precedence climbing: or < and < not < comparison < additive < multiplicative < unary < primary
+    # -- statements ---------------------------------------------------------
+
+    def parse_statement(self) -> Tuple:
+        t = self.peek()
+        if t.kind == "kw":
+            if t.value == "SELECT":
+                return self.parse_select_stmt()
+            if t.value == "CREATE":
+                return self.parse_create_stmt()
+            if t.value == "INSERT":
+                return self.parse_insert_stmt()
+            if t.value == "DELETE":
+                return self.parse_delete_stmt()
+        raise EngineError(f"expected SELECT, CREATE, INSERT or DELETE, got {t.value!r}")
+
+    def _has_from(self) -> bool:
+        """True if a depth-0 FROM keyword follows (no subqueries, so a top-level
+        FROM can only be the SELECT's FROM clause)."""
+        depth = 0
+        for t in self.tokens[self.pos:]:
+            if t.kind == "op" and t.value == "(":
+                depth += 1
+            elif t.kind == "op" and t.value == ")":
+                depth -= 1
+            elif depth == 0 and t.kind == "kw" and t.value == "FROM":
+                return True
+        return False
+
+    def parse_select_stmt(self) -> Tuple:
+        self._expect_kw("SELECT")
+        # column references are only legal when a FROM clause is present; the
+        # select list is parsed before FROM, so scan ahead to find it.
+        self.allow_columns = self._has_from()
+        items: List[Tuple] = []
+        while True:
+            if self.peek().kind == "op" and self.peek().value == "*":
+                self._next()
+                items.append(("star",))
+            else:
+                items.append(self.parse_expr())
+            if self.peek().kind == "op" and self.peek().value == ",":
+                self._next()
+                continue
+            break
+        table_name: Optional[str] = None
+        where: Optional[Tuple] = None
+        if self.peek().kind == "kw" and self.peek().value == "FROM":
+            self._next()
+            table_name = self._name()
+            self.allow_columns = True
+            if self.peek().kind == "kw" and self.peek().value == "WHERE":
+                self._next()
+                where = self.parse_expr()
+        self._finish()
+        return ("select", items, table_name, where)
+
+    def parse_create_stmt(self) -> Tuple:
+        self._expect_kw("CREATE")
+        self._expect_kw("TABLE")
+        name = self._name()
+        self._expect_op("(")
+        columns: List[ColumnDef] = []
+        while True:
+            colname = self._name()
+            # consume the declared type / constraints up to a top-level ',' or ')'
+            depth = 0
+            first_type: Optional[str] = None
+            while True:
+                t = self.peek()
+                if t.kind == "eof":
+                    raise EngineError("unterminated CREATE TABLE column list")
+                if t.kind == "op" and t.value == "(":
+                    depth += 1
+                    self._next()
+                    continue
+                if t.kind == "op" and t.value == ")":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                    self._next()
+                    continue
+                if t.kind == "op" and t.value == "," and depth == 0:
+                    break
+                if first_type is None and t.kind in ("id", "kw"):
+                    first_type = t.value
+                self._next()
+            columns.append(ColumnDef(name=colname, affinity=affinity_of_type(first_type)))
+            t = self.peek()
+            if t.kind == "op" and t.value == ",":
+                self._next()
+                continue
+            if t.kind == "op" and t.value == ")":
+                self._next()
+                break
+            raise EngineError(f"expected ',' or ')', got {t.value!r}")
+        self._finish()
+        return ("create", name, columns)
+
+    def parse_insert_stmt(self) -> Tuple:
+        self._expect_kw("INSERT")
+        self._expect_kw("INTO")
+        name = self._name()
+        columns: Optional[List[str]] = None
+        if self.peek().kind == "op" and self.peek().value == "(":
+            self._next()
+            columns = []
+            while True:
+                columns.append(self._name())
+                t = self._next()
+                if t.kind == "op" and t.value == ",":
+                    continue
+                if t.kind == "op" and t.value == ")":
+                    break
+                raise EngineError(f"expected ',' or ')', got {t.value!r}")
+        self._expect_kw("VALUES")
+        rows: List[List[Tuple]] = []
+        while True:
+            self._expect_op("(")
+            exprs: List[Tuple] = []
+            while True:
+                exprs.append(self.parse_expr())
+                t = self._next()
+                if t.kind == "op" and t.value == ",":
+                    continue
+                if t.kind == "op" and t.value == ")":
+                    break
+                raise EngineError(f"expected ',' or ')', got {t.value!r}")
+            rows.append(exprs)
+            if self.peek().kind == "op" and self.peek().value == ",":
+                self._next()
+                continue
+            break
+        self._finish()
+        return ("insert", name, columns, rows)
+
+    def parse_delete_stmt(self) -> Tuple:
+        self._expect_kw("DELETE")
+        self._expect_kw("FROM")
+        name = self._name()
+        where: Optional[Tuple] = None
+        self.allow_columns = True
+        if self.peek().kind == "kw" and self.peek().value == "WHERE":
+            self._next()
+            where = self.parse_expr()
+        self._finish()
+        return ("delete", name, where)
+
+    # -- expressions --------------------------------------------------------
+
     def parse_expr(self) -> Tuple:
         return self.parse_or()
 
@@ -292,6 +550,23 @@ class Parser:
                     negate = True
                 right = self.parse_additive()
                 left = ("is", left, right, negate)
+            elif t.kind == "kw" and t.value == "LIKE":
+                self._next()
+                right = self.parse_additive()
+                esc = None
+                if self.peek().kind == "kw" and self.peek().value == "ESCAPE":
+                    self._next()
+                    esc = self.parse_additive()
+                left = ("like", left, right, False, esc)
+            elif t.kind == "kw" and t.value == "NOT" and self.peek2().kind == "kw" and self.peek2().value == "LIKE":
+                self._next()
+                self._next()
+                right = self.parse_additive()
+                esc = None
+                if self.peek().kind == "kw" and self.peek().value == "ESCAPE":
+                    self._next()
+                    esc = self.parse_additive()
+                left = ("like", left, right, True, esc)
             else:
                 break
         return left
@@ -349,7 +624,10 @@ class Parser:
             self._expect_op(")")
             return e
         if t.kind == "id":
-            raise EngineError(f"unknown column or identifier {t.value!r} (no FROM clause)")
+            self._next()
+            if not self.allow_columns:
+                raise EngineError(f"unknown column or identifier {t.value!r} (no FROM clause)")
+            return ("col", t.value.lower())
         raise EngineError(f"unexpected token {t.value!r}")
 
     def parse_case(self) -> Tuple:
@@ -379,6 +657,13 @@ class Parser:
 # Evaluator
 # ---------------------------------------------------------------------------
 
+def expr_affinity(node: Tuple, ctx: Optional[RowContext]) -> str:
+    """Affinity of an expression: only bare column refs carry one."""
+    if node[0] == "col" and ctx is not None:
+        return ctx.affinity_of(node[1])
+    return "NONE"
+
+
 def _arith(op: str, a: Any, b: Any) -> Any:
     """Arithmetic with sqlite semantics: NULL propagates, int/int division
     truncates toward zero, division/modulo by zero yields NULL."""
@@ -397,7 +682,6 @@ def _arith(op: str, a: Any, b: Any) -> Any:
             return None if bf == 0 else af / bf
         if op == "mod":
             return None if bf == 0 else math.fmod(af, bf)
-    # both INTEGER
     if op == "add":
         return a + b
     if op == "sub":
@@ -418,10 +702,7 @@ def _arith(op: str, a: Any, b: Any) -> Any:
     raise EngineError(f"unknown arithmetic operator {op!r}")  # pragma: no cover
 
 
-def _cmp(op: str, a: Any, b: Any) -> Any:
-    c = _compare(a, b)
-    if c is None:
-        return None
+def _cmp_result(op: str, c: int) -> int:
     if op in ("=", "=="):
         return 1 if c == 0 else 0
     if op in ("!=", "<>"):
@@ -437,15 +718,78 @@ def _cmp(op: str, a: Any, b: Any) -> Any:
     raise EngineError(f"unknown comparison operator {op!r}")  # pragma: no cover
 
 
-def _is_op(a: Any, b: Any, negate: bool) -> int:
-    """IS / IS NOT: never NULL; NULL IS NULL is true."""
-    if a is None and b is None:
+def _cmp_affinity(op: str, lnode: Tuple, rnode: Tuple, ctx: Optional[RowContext]) -> Any:
+    """Comparison with sqlite affinity rules applied."""
+    lv = eval_expr(lnode, ctx)
+    rv = eval_expr(rnode, ctx)
+    if lv is None or rv is None:
+        return None
+    la = expr_affinity(lnode, ctx)
+    ra = expr_affinity(rnode, ctx)
+    lv, rv = apply_comparison_affinity(la, lv, ra, rv)
+    c = _binary_compare(lv, rv)
+    return _cmp_result(op, c)
+
+
+def _is_affinity(lnode: Tuple, rnode: Tuple, negate: bool, ctx: Optional[RowContext]) -> int:
+    """IS / IS NOT: never NULL; NULL IS NULL is true. Affinity-aware equality."""
+    lv = eval_expr(lnode, ctx)
+    rv = eval_expr(rnode, ctx)
+    if lv is None and rv is None:
         r = True
-    elif a is None or b is None:
+    elif lv is None or rv is None:
         r = False
     else:
-        r = _compare(a, b) == 0
-    return 1 if (r != negate) else 0
+        la = expr_affinity(lnode, ctx)
+        ra = expr_affinity(rnode, ctx)
+        lv, rv = apply_comparison_affinity(la, lv, ra, rv)
+        r = _binary_compare(lv, rv) == 0
+    return 0 if (r == negate) else 1
+
+
+def _ascii_lower(s: str) -> str:
+    return "".join(chr(ord(c) + 32) if "A" <= c <= "Z" else c for c in s)
+
+
+def _like_to_regex(pattern: str, esc: Optional[str]) -> str:
+    out: List[str] = []
+    i = 0
+    n = len(pattern)
+    while i < n:
+        ch = pattern[i]
+        if esc is not None and ch == esc:
+            if i + 1 < n:
+                out.append(re.escape(pattern[i + 1]))
+                i += 2
+                continue
+            out.append(re.escape(esc))
+            i += 1
+            continue
+        if ch == "%":
+            out.append(".*")
+        elif ch == "_":
+            out.append(".")
+        else:
+            out.append(re.escape(ch))
+        i += 1
+    return "^" + "".join(out) + "$"
+
+
+def _like(lnode: Tuple, rnode: Tuple, negate: bool, esc_node: Optional[Tuple],
+          ctx: Optional[RowContext]) -> Any:
+    lv = eval_expr(lnode, ctx)
+    rv = eval_expr(rnode, ctx)
+    if lv is None or rv is None:
+        return None
+    ev = eval_expr(esc_node, ctx) if esc_node is not None else None
+    if ev is not None and len(render_value(ev)) != 1:
+        raise EngineError("ESCAPE expression must be a single character")
+    text = _ascii_lower(render_value(lv))
+    pattern = _ascii_lower(render_value(rv))
+    regex = _like_to_regex(pattern, None if ev is None else render_value(ev))
+    matched = re.fullmatch(regex, text) is not None
+    r = 1 if matched else 0
+    return 0 if (r == negate) else 1
 
 
 def _and(a: Any, b: Any) -> Any:
@@ -470,7 +814,7 @@ def _not(a: Any) -> Any:
     return 0 if a != 0 else 1
 
 
-def eval_expr(node: Tuple) -> Any:
+def eval_expr(node: Tuple, ctx: Optional[RowContext] = None) -> Any:
     kind = node[0]
     if kind == "num":
         return node[1]
@@ -478,49 +822,76 @@ def eval_expr(node: Tuple) -> Any:
         return node[1]
     if kind == "null":
         return None
+    if kind == "col":
+        if ctx is None:
+            raise EngineError(f"no such column: {node[1]}")
+        return ctx.value_of(node[1])
     if kind == "neg":
-        v = eval_expr(node[1])
+        v = eval_expr(node[1], ctx)
         return None if v is None else -v
     if kind == "add":
-        return _arith("add", eval_expr(node[1]), eval_expr(node[2]))
+        return _arith("add", eval_expr(node[1], ctx), eval_expr(node[2], ctx))
     if kind == "sub":
-        return _arith("sub", eval_expr(node[1]), eval_expr(node[2]))
+        return _arith("sub", eval_expr(node[1], ctx), eval_expr(node[2], ctx))
     if kind == "mul":
-        return _arith("mul", eval_expr(node[1]), eval_expr(node[2]))
+        return _arith("mul", eval_expr(node[1], ctx), eval_expr(node[2], ctx))
     if kind == "div":
-        return _arith("div", eval_expr(node[1]), eval_expr(node[2]))
+        return _arith("div", eval_expr(node[1], ctx), eval_expr(node[2], ctx))
     if kind == "mod":
-        return _arith("mod", eval_expr(node[1]), eval_expr(node[2]))
+        return _arith("mod", eval_expr(node[1], ctx), eval_expr(node[2], ctx))
     if kind == "cmp":
-        return _cmp(node[1], eval_expr(node[2]), eval_expr(node[3]))
+        return _cmp_affinity(node[1], node[2], node[3], ctx)
     if kind == "is":
-        return _is_op(eval_expr(node[1]), eval_expr(node[2]), node[3])
+        return _is_affinity(node[1], node[2], node[3], ctx)
+    if kind == "like":
+        return _like(node[1], node[2], node[3], node[4], ctx)
     if kind == "and":
-        return _and(eval_expr(node[1]), eval_expr(node[2]))
+        return _and(eval_expr(node[1], ctx), eval_expr(node[2], ctx))
     if kind == "or":
-        return _or(eval_expr(node[1]), eval_expr(node[2]))
+        return _or(eval_expr(node[1], ctx), eval_expr(node[2], ctx))
     if kind == "not":
-        return _not(eval_expr(node[1]))
+        return _not(eval_expr(node[1], ctx))
     if kind == "case":
-        return _case(node[1], node[2], node[3])
+        return _case(node[1], node[2], node[3], ctx)
     raise EngineError(f"unknown AST node {kind!r}")  # pragma: no cover
 
 
-def _case(base: Optional[Tuple], whens: List[Tuple[Tuple, Tuple]], else_: Optional[Tuple]) -> Any:
-    base_v = eval_expr(base) if base is not None else None
+def _case(base: Optional[Tuple], whens: List[Tuple[Tuple, Tuple]], else_: Optional[Tuple],
+          ctx: Optional[RowContext]) -> Any:
+    base_v = eval_expr(base, ctx) if base is not None else None
     for cond, val in whens:
         if base is None:
-            c = eval_expr(cond)
+            c = eval_expr(cond, ctx)
             if c is not None and c != 0:
-                return eval_expr(val)
+                return eval_expr(val, ctx)
         else:
-            w = eval_expr(cond)
-            # simple CASE matches with = semantics: NULL never matches
-            if base_v is not None and w is not None and _compare(base_v, w) == 0:
-                return eval_expr(val)
+            # simple CASE matches with = semantics (affinity-aware), NULL never matches
+            w = eval_expr(cond, ctx)
+            if base_v is not None and w is not None:
+                la = expr_affinity(base, ctx)
+                ra = expr_affinity(cond, ctx)
+                b2, w2 = apply_comparison_affinity(la, base_v, ra, w)
+                if _binary_compare(b2, w2) == 0:
+                    return eval_expr(val, ctx)
     if else_ is not None:
-        return eval_expr(else_)
+        return eval_expr(else_, ctx)
     return None
+
+
+def _truthy(v: Any) -> bool:
+    return v is not None and v != 0
+
+
+def _walk_expr_cols(node: Any):
+    """Yield column names referenced by an expression AST."""
+    if isinstance(node, tuple) and node:
+        if node[0] == "col":
+            yield node[1]
+        for child in node[1:]:
+            yield from _walk_expr_cols(child)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _walk_expr_cols(item)
 
 
 # ---------------------------------------------------------------------------
@@ -533,8 +904,9 @@ class StatementResult:
 
     error:    None on success, otherwise a human-readable message.
     rows:     List of rows (each row a list of raw values) for SELECT;
-              None when the statement failed or returned no rows.
-    rowcount: number of result rows (0 for failed statements).
+              None for statements that do not return rows.
+    rowcount: number of affected rows (INSERT/DELETE) or result rows
+              (SELECT); 0 for CREATE and failed statements.
     """
 
     error: Optional[str] = None
@@ -543,7 +915,10 @@ class StatementResult:
 
 
 class Engine:
-    """Minimal sqlite-compatible expression engine."""
+    """In-memory single-table SQL engine with sqlite-compatible semantics."""
+
+    def __init__(self):
+        self.tables: Dict[str, Table] = {}
 
     def execute(self, sql: str) -> StatementResult:
         sql = sql.strip()
@@ -551,8 +926,121 @@ class Engine:
             return StatementResult(error="empty statement")
         try:
             tokens = tokenize(sql)
-            exprs = Parser(tokens).parse_select()
-            values = [eval_expr(e) for e in exprs]
+            stmt = Parser(tokens).parse_statement()
+            return self._run(stmt)
         except EngineError as e:
             return StatementResult(error=str(e))
-        return StatementResult(rows=[values], rowcount=1)
+
+    def _run(self, stmt: Tuple) -> StatementResult:
+        kind = stmt[0]
+        if kind == "select":
+            return self._run_select(stmt)
+        if kind == "create":
+            return self._run_create(stmt)
+        if kind == "insert":
+            return self._run_insert(stmt)
+        if kind == "delete":
+            return self._run_delete(stmt)
+        raise EngineError(f"unknown statement {kind!r}")  # pragma: no cover
+
+    def _run_create(self, stmt: Tuple) -> StatementResult:
+        _, name, columns = stmt
+        if name in self.tables:
+            raise EngineError(f"table {name} already exists")
+        self.tables[name] = Table(name=name, columns=columns)
+        return StatementResult(rowcount=0)
+
+    def _run_insert(self, stmt: Tuple) -> StatementResult:
+        _, name, columns, rows = stmt
+        table = self.tables.get(name)
+        if table is None:
+            raise EngineError(f"no such table: {name}")
+        ncols = len(table.columns)
+        col_index = {c.name: i for i, c in enumerate(table.columns)}
+        # Validate and convert every row before mutating the table, so an
+        # error anywhere leaves the table untouched (statement atomicity).
+        prepared: List[List[Any]] = []
+        for exprs in rows:
+            values = [eval_expr(e, None) for e in exprs]
+            if columns is not None:
+                if len(columns) != len(values):
+                    raise EngineError(
+                        f"table {name} has {ncols} columns but {len(values)} values were supplied"
+                    )
+                row = [None] * ncols
+                for cname, v in zip(columns, values):
+                    if cname not in col_index:
+                        raise EngineError(f"table {name} has no column named {cname}")
+                    row[col_index[cname]] = v
+                values = row
+            elif len(values) != ncols:
+                raise EngineError(
+                    f"table {name} has {ncols} columns but {len(values)} values were supplied"
+                )
+            prepared.append(
+                [_convert_to_affinity(v, c.affinity) for v, c in zip(values, table.columns)]
+            )
+        table.rows.extend(prepared)
+        return StatementResult(rowcount=len(prepared))
+
+    def _run_delete(self, stmt: Tuple) -> StatementResult:
+        _, name, where = stmt
+        table = self.tables.get(name)
+        if table is None:
+            raise EngineError(f"no such table: {name}")
+        if where is not None:
+            known = {c.name for c in table.columns}
+            for col in _walk_expr_cols(where):
+                if col not in known:
+                    raise EngineError(f"no such column: {col}")
+        if where is None:
+            deleted = len(table.rows)
+            table.rows = []
+            return StatementResult(rowcount=deleted)
+        kept = []
+        deleted = 0
+        for row in table.rows:
+            ctx = RowContext(table, row)
+            if _truthy(eval_expr(where, ctx)):
+                deleted += 1
+            else:
+                kept.append(row)
+        table.rows = kept
+        return StatementResult(rowcount=deleted)
+
+    def _run_select(self, stmt: Tuple) -> StatementResult:
+        _, items, table_name, where = stmt
+        if table_name is None:
+            # expression-only SELECT (no FROM): a single row
+            if any(it[0] == "star" for it in items):
+                raise EngineError("SELECT * requires a FROM clause")
+            values = [eval_expr(e, None) for e in items]
+            return StatementResult(rows=[values], rowcount=1)
+        table = self.tables.get(table_name)
+        if table is None:
+            raise EngineError(f"no such table: {table_name}")
+        # validate column references up front (sqlite resolves columns at
+        # prepare time, so an empty table must still reject bad columns)
+        known = {c.name for c in table.columns}
+        for item in items:
+            if item[0] != "star":
+                for col in _walk_expr_cols(item):
+                    if col not in known:
+                        raise EngineError(f"no such column: {col}")
+        if where is not None:
+            for col in _walk_expr_cols(where):
+                if col not in known:
+                    raise EngineError(f"no such column: {col}")
+        out_rows: List[List[Any]] = []
+        for row in table.rows:
+            ctx = RowContext(table, row)
+            if where is not None and not _truthy(eval_expr(where, ctx)):
+                continue
+            projected: List[Any] = []
+            for item in items:
+                if item[0] == "star":
+                    projected.extend(row)
+                else:
+                    projected.append(eval_expr(item, ctx))
+            out_rows.append(projected)
+        return StatementResult(rows=out_rows, rowcount=len(out_rows))

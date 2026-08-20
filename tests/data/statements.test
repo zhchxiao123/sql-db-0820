@@ -25,10 +25,7 @@ statement error
 SELECT unknown_column;
 
 statement error
-CREATE TABLE t1(x, y);
-
-statement error
-SELECT 3 values hashing to deadbeef;
+DROP TABLE t1;
 
 statement error
 SELECT 'oops;

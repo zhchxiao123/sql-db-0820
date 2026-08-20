@@ -1,0 +1,51 @@
+# Failure paths — a5 acceptance data.
+# Illegal statements are judged as failed; the runner keeps going and exits
+# non-zero without crashing or hanging. The last two statement ok records are
+# intentionally invalid so this file produces failures.
+
+statement ok
+CREATE TABLE f(a INTEGER, b TEXT);
+
+# statement error: these are all expected to fail and therefore pass
+statement error
+INSERT INTO f VALUES (1);
+
+statement error
+INSERT INTO f VALUES (1, 'x', 3);
+
+statement error
+INSERT INTO f VALUES (1, 2, 3, 4);
+
+statement error
+SELECT * FROM nosuch;
+
+statement error
+DELETE FROM nosuch;
+
+statement error
+CREATE TABLE f(x INTEGER);
+
+statement error
+SELECT * FROM f WHERE z = 1;
+
+# intentional failures: statement ok on invalid SQL -> judged failed,
+# the runner must continue with the rest of the file
+statement ok
+INSERT INTO f VALUES (1, 'x', 'extra');
+
+statement ok
+SELECT * FROM missing_table;
+
+# the valid record after the failures still runs
+query IT
+SELECT * FROM f;
+----
+
+statement ok
+INSERT INTO f VALUES (1, 'ok');
+
+query IT
+SELECT * FROM f;
+----
+1
+ok

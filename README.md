@@ -3,17 +3,22 @@
 A sqlite-compatible database engine whose goal is to pass the full
 sqllogictest corpus. Work in progress.
 
-## Current slice: foundation
+## Current capabilities
 
 * **sqllogictest runner** (`sqldb/runner.py`) — parses sqllogictest protocol
   files (`statement` / `query` records, `----` result separator, plaintext and
-  sqlite-style hash expectations), executes each record against the engine,
-  aggregates pass/fail per file and exits non-zero when anything fails.
-* **Minimal expression engine** (`sqldb/engine.py`) — parses and evaluates
-  `SELECT <expr-list>` without a `FROM` clause: integer/real/text/NULL
-  literals, `+ - * / %` with parentheses, comparisons, `AND`/`OR`/`NOT`,
-  `CASE WHEN`, and sqlite-compatible NULL semantics (`NULL` in comparisons
-  yields `NULL`, `IS NULL` / `IS NOT NULL` available).
+  sqlite-style hash expectations), executes each record against a fresh
+  engine per file, aggregates pass/fail per file and exits non-zero when
+  anything fails.
+* **Expression engine** (`sqldb/engine.py`) — `SELECT <expr-list>` without
+  `FROM`: integer/real/text/NULL literals, `+ - * / %` with parentheses,
+  comparisons, `AND`/`OR`/`NOT`, `CASE WHEN`, `IS NULL` / `IS NOT NULL`,
+  sqlite-compatible NULL semantics.
+* **Single-table storage** — `CREATE TABLE` (sqlite type affinity),
+  `INSERT ... VALUES` (multi-row, optional column list), `DELETE` (with or
+  without `WHERE`), `SELECT` with `FROM` and `WHERE` (equality, ranges,
+  `AND`/`OR`, `IS NULL`, `LIKE` / `NOT LIKE` / `ESCAPE`, column references
+  in expressions, `*`).
 
 The runner CLI is the project's test seam — every later slice is accepted
 through it.
@@ -34,14 +39,30 @@ python -m unittest discover -s tests -v
 ### Runner output
 
 ```
-tests/data/expressions.test: 25 passed, 0 failed, 0 skipped
-TOTAL: 25 passed, 0 failed, 0 skipped
+tests/data/select1.test: 26 passed, 0 failed, 0 skipped
+TOTAL: 122 passed, 0 failed, 0 skipped
 ```
 
 With `-v`, failing records are printed with expected vs. actual detail.
 A malformed file (missing `----`, unreadable, illegal SQL) is judged as
 failed records and the runner still processes the remaining file, exiting
 with a non-zero code.
+
+## Type affinity (sqlite semantics)
+
+Declared column types map to affinities (`INT` -> INTEGER, `CHAR/CLOB/TEXT`
+-> TEXT, `REAL/FLOA/DOUB` -> REAL, `BLOB`/empty -> NONE, otherwise NUMERIC).
+
+* **Storage**: values are converted to the column affinity on insert — a
+  REAL column stores `3` as `3.0` and `'4'` as `4.0`; a TEXT column stores
+  `5` as `'5'`; an INTEGER column stores `'2'` as `2` but keeps `'abc'` as
+  text.
+* **Comparison**: sqlite's two affinity rules — an INTEGER/REAL/NUMERIC
+  affinity operand converts the other operand numerically (text -> number
+  when possible); a TEXT affinity operand converts a no-affinity operand to
+  text. With no affinity involved, values compare by storage class: numbers
+  numerically, text byte-wise, and numbers always sort before text
+  (`SELECT 5 = '5';` is `0`).
 
 ## Design notes
 
@@ -55,6 +76,19 @@ with a non-zero code.
   division or modulo by zero yields `NULL` (no error), matching sqlite.
 * **NULL semantics**: `NULL` in comparisons and arithmetic yields `NULL`;
   `AND`/`OR`/`NOT` follow sqlite's three-valued logic; `IS`/`IS NOT` never
-  yield `NULL` (`NULL IS NULL` is true).
-* Statements outside the current scope (`FROM`, DDL, DML, ...) fail the
-  record with a clear error instead of crashing the runner.
+  yield `NULL` (`NULL IS NULL` is true); `LIKE` with a NULL operand yields
+  `NULL`.
+* **LIKE** is ASCII case-insensitive by default; `%` matches any sequence,
+  `_` matches one character, `ESCAPE` overrides the escape character.
+* **Storage is in-memory** per engine instance; the runner gives each test
+  file a fresh engine (like a fresh sqlite connection per file). Durability
+  is out of scope for this slice.
+* Statements outside the current scope (`FROM` joins, `UPDATE`, `DROP`, ...)
+  fail the record with a clear error instead of crashing the runner.
+
+## Test strategy
+
+`tests/test_sqlite_parity.py` runs a battery of scenarios against the real
+sqlite3 (Python stdlib) and asserts our engine's rendered output matches
+line by line — this pins the affinity/comparison/LIKE semantics to actual
+sqlite behavior.

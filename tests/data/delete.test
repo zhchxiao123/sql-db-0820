@@ -1,0 +1,51 @@
+# DELETE semantics — a4 acceptance data.
+
+statement ok
+CREATE TABLE d(x INTEGER, y TEXT);
+
+statement ok
+INSERT INTO d VALUES (1, 'a'), (2, 'b'), (3, 'c');
+
+# DELETE with WHERE removes only matching rows
+statement count 1
+DELETE FROM d WHERE x = 2;
+
+query IT
+SELECT * FROM d;
+----
+1
+a
+3
+c
+
+# DELETE without WHERE removes everything
+statement count 2
+DELETE FROM d;
+
+query IT
+SELECT * FROM d;
+----
+
+# the table is usable after deletion
+statement ok
+INSERT INTO d VALUES (4, 'd'), (5, 'e');
+
+# DELETE with WHERE removes the matching row only
+statement count 1
+DELETE FROM d WHERE x = 5;
+
+query IT
+SELECT * FROM d;
+----
+4
+d
+
+# DELETE with no match affects 0 rows
+statement count 0
+DELETE FROM d WHERE x = 99;
+
+query IT
+SELECT * FROM d;
+----
+4
+d
