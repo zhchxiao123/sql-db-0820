@@ -1,0 +1,98 @@
+# CREATE INDEX / DROP INDEX — a1/a2/a3 acceptance data.
+# Indexes must not change query results (correctness-first slice).
+
+statement ok
+CREATE TABLE t(a INTEGER, b TEXT, c REAL);
+
+statement ok
+INSERT INTO t VALUES (1, 'x', 1.5), (2, 'y', 2.5), (3, 'z', 3.5);
+
+# a1: CREATE INDEX single and multi-column; duplicate handling
+statement ok
+CREATE INDEX idx_a ON t(a);
+
+statement ok
+CREATE INDEX idx_ab ON t(a, b);
+
+statement error
+CREATE INDEX idx_a ON t(a);
+
+statement ok
+CREATE INDEX IF NOT EXISTS idx_a ON t(a);
+
+statement ok
+CREATE INDEX idx_dirs ON t(a DESC, b);
+
+# a2: queries after indexing match the unindexed results
+query ITR
+SELECT * FROM t WHERE a = 2;
+----
+2
+y
+2.5
+
+query ITR
+SELECT * FROM t WHERE a >= 2 AND a < 3;
+----
+2
+y
+2.5
+
+query IT
+SELECT a, b FROM t WHERE b LIKE 'y%' OR a = 1 ORDER BY a;
+----
+1
+x
+2
+y
+
+query ITR
+SELECT * FROM t ORDER BY a DESC;
+----
+3
+z
+3.5
+2
+y
+2.5
+1
+x
+1.5
+
+# data changes after indexing keep results identical
+statement ok
+INSERT INTO t VALUES (4, 'w', 4.5);
+
+query ITR
+SELECT * FROM t WHERE a = 4;
+----
+4
+w
+4.5
+
+statement ok
+DELETE FROM t WHERE a = 4;
+
+query ITR
+SELECT * FROM t WHERE a = 4;
+----
+
+# DROP INDEX and re-create
+statement ok
+DROP INDEX idx_a;
+
+statement error
+DROP INDEX idx_a;
+
+statement ok
+DROP INDEX IF EXISTS idx_a;
+
+statement ok
+CREATE INDEX idx_a2 ON t(a);
+
+query ITR
+SELECT * FROM t WHERE a = 3;
+----
+3
+z
+3.5

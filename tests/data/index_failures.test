@@ -1,0 +1,46 @@
+# Index failure paths — a4 acceptance data.
+# Invalid references or syntax are judged as failures; the runner keeps going.
+
+statement ok
+CREATE TABLE f(a INTEGER);
+
+statement ok
+INSERT INTO f VALUES (1), (2), (3);
+
+statement error
+CREATE INDEX i ON nosuch(a);
+
+statement error
+CREATE INDEX i ON f(z);
+
+statement error
+CREATE INDEX i ON f;
+
+statement error
+DROP INDEX nosuch;
+
+statement error
+CREATE INDEX;
+
+statement error
+DROP INDEX;
+
+# intentional failure: statement ok on invalid index SQL -> judged failed
+statement ok
+CREATE INDEX i ON nosuch(a);
+
+# valid records after the failures still run
+query I
+SELECT * FROM f ORDER BY a;
+----
+1
+2
+3
+
+statement ok
+CREATE INDEX idx_f ON f(a);
+
+query I
+SELECT * FROM f WHERE a = 2;
+----
+2

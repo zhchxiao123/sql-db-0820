@@ -25,6 +25,11 @@ sqllogictest corpus. Work in progress.
   collapse, numbers compare numerically), `LIMIT n` / `LIMIT n OFFSET m`
   / `LIMIT o, c` (negative LIMIT = no limit, negative OFFSET = 0,
   sort-then-slice).
+* **Indexes** — `CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON t (col, ...)`
+  and `DROP INDEX [IF EXISTS] name` (single and multi-column, per-column
+  `ASC`/`DESC`). Correctness-first: indexes are validated and recorded but
+  do not change query results (lookup stays a full scan until the
+  performance slice); duplicate creation errors per sqlite.
 
 The runner CLI is the project's test seam — every later slice is accepted
 through it.

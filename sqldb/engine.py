@@ -179,6 +179,7 @@ KEYWORDS = {
     "CREATE", "TABLE", "INSERT", "INTO", "VALUES", "DELETE",
     "FROM", "WHERE", "LIKE", "ESCAPE",
     "DISTINCT", "ORDER", "BY", "ASC", "DESC", "LIMIT", "OFFSET",
+    "INDEX", "UNIQUE", "IF", "EXISTS", "ON", "DROP",
 }
 
 _NUM_RE = re.compile(r"(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?")
@@ -287,6 +288,18 @@ class Table:
     rows: List[List[Any]] = field(default_factory=list)
 
 
+@dataclass
+class IndexDef:
+    """Index metadata. This slice is correctness-first: indexes are recorded
+    and validated but do not participate in query execution (lookup paths
+    remain full table scans until the performance slice)."""
+
+    name: str
+    table: str
+    columns: List[str]
+    unique: bool = False
+
+
 class RowContext:
     """Binds a table row to column names for expression evaluation."""
 
@@ -374,7 +387,9 @@ class Parser:
                 return self.parse_insert_stmt()
             if t.value == "DELETE":
                 return self.parse_delete_stmt()
-        raise EngineError(f"expected SELECT, CREATE, INSERT or DELETE, got {t.value!r}")
+            if t.value == "DROP":
+                return self.parse_drop_stmt()
+        raise EngineError(f"expected SELECT, CREATE, INSERT, DELETE or DROP, got {t.value!r}")
 
     def _has_from(self) -> bool:
         """True if a depth-0 FROM keyword follows (no subqueries, so a top-level
@@ -454,45 +469,90 @@ class Parser:
 
     def parse_create_stmt(self) -> Tuple:
         self._expect_kw("CREATE")
-        self._expect_kw("TABLE")
-        name = self._name()
-        self._expect_op("(")
-        columns: List[ColumnDef] = []
-        while True:
-            colname = self._name()
-            # consume the declared type / constraints up to a top-level ',' or ')'
-            depth = 0
-            first_type: Optional[str] = None
+        unique = False
+        if self.peek().kind == "kw" and self.peek().value == "UNIQUE":
+            self._next()
+            unique = True
+        t = self.peek()
+        if t.kind == "kw" and t.value == "TABLE":
+            self._next()
+            name = self._name()
+            self._expect_op("(")
+            columns: List[ColumnDef] = []
             while True:
+                colname = self._name()
+                # consume the declared type / constraints up to a top-level ',' or ')'
+                depth = 0
+                first_type: Optional[str] = None
+                while True:
+                    t = self.peek()
+                    if t.kind == "eof":
+                        raise EngineError("unterminated CREATE TABLE column list")
+                    if t.kind == "op" and t.value == "(":
+                        depth += 1
+                        self._next()
+                        continue
+                    if t.kind == "op" and t.value == ")":
+                        if depth == 0:
+                            break
+                        depth -= 1
+                        self._next()
+                        continue
+                    if t.kind == "op" and t.value == "," and depth == 0:
+                        break
+                    if first_type is None and t.kind in ("id", "kw"):
+                        first_type = t.value
+                    self._next()
+                columns.append(ColumnDef(name=colname, affinity=affinity_of_type(first_type)))
                 t = self.peek()
-                if t.kind == "eof":
-                    raise EngineError("unterminated CREATE TABLE column list")
-                if t.kind == "op" and t.value == "(":
-                    depth += 1
+                if t.kind == "op" and t.value == ",":
                     self._next()
                     continue
                 if t.kind == "op" and t.value == ")":
-                    if depth == 0:
-                        break
-                    depth -= 1
                     self._next()
-                    continue
-                if t.kind == "op" and t.value == "," and depth == 0:
                     break
-                if first_type is None and t.kind in ("id", "kw"):
-                    first_type = t.value
+                raise EngineError(f"expected ',' or ')', got {t.value!r}")
+            self._finish()
+            return ("create", name, columns)
+        if t.kind == "kw" and t.value == "INDEX":
+            self._next()
+            if_not_exists = False
+            if self.peek().kind == "kw" and self.peek().value == "IF":
                 self._next()
-            columns.append(ColumnDef(name=colname, affinity=affinity_of_type(first_type)))
-            t = self.peek()
-            if t.kind == "op" and t.value == ",":
-                self._next()
-                continue
-            if t.kind == "op" and t.value == ")":
-                self._next()
-                break
-            raise EngineError(f"expected ',' or ')', got {t.value!r}")
+                self._expect_kw("NOT")
+                self._expect_kw("EXISTS")
+                if_not_exists = True
+            name = self._name()
+            self._expect_kw("ON")
+            table = self._name()
+            self._expect_op("(")
+            columns: List[str] = []
+            while True:
+                col = self._name()
+                if self.peek().kind == "kw" and self.peek().value in ("ASC", "DESC"):
+                    self._next()  # index column direction is parsed but unused
+                columns.append(col)
+                t = self._next()
+                if t.kind == "op" and t.value == ",":
+                    continue
+                if t.kind == "op" and t.value == ")":
+                    break
+                raise EngineError(f"expected ',' or ')', got {t.value!r}")
+            self._finish()
+            return ("create_index", name, table, columns, unique, if_not_exists)
+        raise EngineError(f"expected TABLE or INDEX after CREATE, got {t.value!r}")
+
+    def parse_drop_stmt(self) -> Tuple:
+        self._expect_kw("DROP")
+        self._expect_kw("INDEX")
+        if_exists = False
+        if self.peek().kind == "kw" and self.peek().value == "IF":
+            self._next()
+            self._expect_kw("EXISTS")
+            if_exists = True
+        name = self._name()
         self._finish()
-        return ("create", name, columns)
+        return ("drop_index", name, if_exists)
 
     def parse_insert_stmt(self) -> Tuple:
         self._expect_kw("INSERT")
@@ -1016,6 +1076,7 @@ class Engine:
 
     def __init__(self):
         self.tables: Dict[str, Table] = {}
+        self.indexes: Dict[str, IndexDef] = {}
 
     def execute(self, sql: str) -> StatementResult:
         sql = sql.strip()
@@ -1038,6 +1099,10 @@ class Engine:
             return self._run_insert(stmt)
         if kind == "delete":
             return self._run_delete(stmt)
+        if kind == "create_index":
+            return self._run_create_index(stmt)
+        if kind == "drop_index":
+            return self._run_drop_index(stmt)
         raise EngineError(f"unknown statement {kind!r}")  # pragma: no cover
 
     def _run_create(self, stmt: Tuple) -> StatementResult:
@@ -1046,6 +1111,31 @@ class Engine:
             raise EngineError(f"table {name} already exists")
         self.tables[name] = Table(name=name, columns=columns)
         return StatementResult(rowcount=0)
+
+    def _run_create_index(self, stmt: Tuple) -> StatementResult:
+        _, name, table_name, columns, unique, if_not_exists = stmt
+        table = self.tables.get(table_name)
+        if table is None:
+            raise EngineError(f"no such table: {table_name}")
+        known = {c.name for c in table.columns}
+        for col in columns:
+            if col not in known:
+                raise EngineError(f"no such column: {col}")
+        if name in self.indexes:
+            if if_not_exists:
+                return StatementResult(rowcount=0)
+            raise EngineError(f"index {name} already exists")
+        self.indexes[name] = IndexDef(name=name, table=table_name, columns=columns, unique=unique)
+        return StatementResult(rowcount=0)
+
+    def _run_drop_index(self, stmt: Tuple) -> StatementResult:
+        _, name, if_exists = stmt
+        if name in self.indexes:
+            del self.indexes[name]
+            return StatementResult(rowcount=0)
+        if if_exists:
+            return StatementResult(rowcount=0)
+        raise EngineError(f"no such index: {name}")
 
     def _run_insert(self, stmt: Tuple) -> StatementResult:
         _, name, columns, rows = stmt
